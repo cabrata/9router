@@ -123,7 +123,7 @@ export default function RequestLogsClient() {
                     <td className="p-3 font-mono text-xs"><span className="text-text-muted">{l.method}</span> {l.path}</td>
                     <td className="p-3 text-xs max-w-[260px]">
                       <div className="truncate" title={l.model}>{l.model || "-"}</div>
-                      {l.resolvedModel && l.resolvedModel !== l.model && (
+                      {l.resolvedModel && l.resolvedModel !== l.model && !l.model?.endsWith(`/${l.resolvedModel}`) && (
                         <div className="truncate text-[11px] text-text-muted" title={`${l.provider}/${l.resolvedModel}`}>→ {l.provider}/{l.resolvedModel}</div>
                       )}
                     </td>
