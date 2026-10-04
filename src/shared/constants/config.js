@@ -107,3 +107,6 @@ export {
   PROVIDER_MODELS,
   AI_MODELS,
 } from "./models.js";
+
+// Endpoint types an API key can be restricted to (see src/lib/requestLog.js).
+export const ENDPOINT_KINDS = ["chat", "embeddings", "images", "tts", "stt", "video", "search", "fetch", "systemone"];

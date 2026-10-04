@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
+import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+
+const listCol = (v) => (Array.isArray(v) && v.length ? stringifyJson(v) : null);
 
 function rowToKey(row) {
   if (!row) return null;
@@ -10,6 +13,8 @@ function rowToKey(row) {
     machineId: row.machineId,
     isActive: row.isActive === 1 || row.isActive === true,
     createdAt: row.createdAt,
+    allowedModels: parseJson(row.allowedModels, []) || [],
+    allowedEndpoints: parseJson(row.allowedEndpoints, []) || [],
   };
 }
 
@@ -53,8 +58,8 @@ export async function updateApiKey(id, data) {
     if (!row) return;
     const merged = { ...rowToKey(row), ...data };
     db.run(
-      `UPDATE apiKeys SET key = ?, name = ?, machineId = ?, isActive = ? WHERE id = ?`,
-      [merged.key, merged.name, merged.machineId, merged.isActive ? 1 : 0, id]
+      `UPDATE apiKeys SET key = ?, name = ?, machineId = ?, isActive = ?, allowedModels = ?, allowedEndpoints = ? WHERE id = ?`,
+      [merged.key, merged.name, merged.machineId, merged.isActive ? 1 : 0, listCol(merged.allowedModels), listCol(merged.allowedEndpoints), id]
     );
     result = merged;
   });
@@ -72,4 +77,11 @@ export async function validateApiKey(key) {
   const row = db.get(`SELECT isActive FROM apiKeys WHERE key = ?`, [key]);
   if (!row) return false;
   return row.isActive === 1 || row.isActive === true;
+}
+
+// Full record for an incoming key (null if unknown). Used for logging + permissions.
+export async function getApiKeyByKey(key) {
+  if (!key) return null;
+  const db = await getAdapter();
+  return rowToKey(db.get(`SELECT * FROM apiKeys WHERE key = ?`, [key]));
 }

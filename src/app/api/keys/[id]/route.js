@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteApiKey, getApiKeyById, updateApiKey } from "@/lib/localDb";
+import { ENDPOINT_KINDS } from "@/lib/requestLog.js";
 
 // GET /api/keys/[id] - Get single key
 export async function GET(request, { params }) {
@@ -21,15 +22,30 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { isActive } = body;
+    const { isActive, name, allowedModels, allowedEndpoints } = body;
 
     const existing = await getApiKeyById(id);
     if (!existing) {
       return NextResponse.json({ error: "Key not found" }, { status: 404 });
     }
 
+    const isStrList = (v) => Array.isArray(v) && v.length <= 1000 && v.every((s) => typeof s === "string" && s.length > 0 && s.length <= 300);
     const updateData = {};
-    if (isActive !== undefined) updateData.isActive = isActive;
+    if (isActive !== undefined) updateData.isActive = !!isActive;
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) return NextResponse.json({ error: "Invalid name" }, { status: 400 });
+      updateData.name = name.trim();
+    }
+    if (allowedModels !== undefined) {
+      if (!isStrList(allowedModels)) return NextResponse.json({ error: "allowedModels must be an array of strings" }, { status: 400 });
+      updateData.allowedModels = [...new Set(allowedModels.map((s) => s.trim()).filter(Boolean))];
+    }
+    if (allowedEndpoints !== undefined) {
+      if (!isStrList(allowedEndpoints) || allowedEndpoints.some((e) => !ENDPOINT_KINDS.includes(e))) {
+        return NextResponse.json({ error: `allowedEndpoints must be a subset of: ${ENDPOINT_KINDS.join(", ")}` }, { status: 400 });
+      }
+      updateData.allowedEndpoints = [...new Set(allowedEndpoints)];
+    }
 
     const updated = await updateApiKey(id, updateData);
 

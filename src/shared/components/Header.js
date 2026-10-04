@@ -84,6 +84,13 @@ const getPageInfo = (pathname) => {
       icon: "layers",
       breadcrumbs: [],
     };
+  if (pathname.includes("/request-logs"))
+    return {
+      title: "Request Logs",
+      description: "Every API request: key, IP, path, model, tokens, TPS, status",
+      icon: "receipt_long",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/usage"))
     return {
       title: "Usage & Analytics",

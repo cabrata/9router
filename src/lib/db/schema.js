@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -83,6 +83,9 @@ export const TABLES = {
       machineId: "TEXT",
       isActive: "INTEGER DEFAULT 1",
       createdAt: "TEXT NOT NULL",
+      // JSON arrays; NULL/empty = unrestricted
+      allowedModels: "TEXT",
+      allowedEndpoints: "TEXT",
     },
     indexes: ["CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)"],
   },
@@ -150,6 +153,35 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider)",
       "CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model)",
       "CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
+    ],
+  },
+  requestLogs: {
+    columns: {
+      id: "INTEGER PRIMARY KEY AUTOINCREMENT",
+      timestamp: "TEXT NOT NULL",
+      apiKeyId: "TEXT",
+      apiKeyName: "TEXT",
+      apiKeyMasked: "TEXT",
+      ip: "TEXT",
+      method: "TEXT",
+      path: "TEXT",
+      endpointKind: "TEXT",
+      model: "TEXT",
+      provider: "TEXT",
+      resolvedModel: "TEXT",
+      status: "INTEGER",
+      stream: "INTEGER DEFAULT 0",
+      promptTokens: "INTEGER DEFAULT 0",
+      completionTokens: "INTEGER DEFAULT 0",
+      durationMs: "INTEGER DEFAULT 0",
+      ttftMs: "INTEGER DEFAULT 0",
+      tps: "REAL DEFAULT 0",
+      userAgent: "TEXT",
+      error: "TEXT",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_rl_ts ON requestLogs(timestamp DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_rl_key ON requestLogs(apiKeyId)",
     ],
   },
 };

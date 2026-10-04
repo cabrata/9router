@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
+import { recordUsageForRequestLog } from "./requestLogsRepo.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
@@ -240,10 +241,12 @@ export async function getActiveRequests() {
 }
 
 export async function saveRequestUsage(entry) {
+  // Sync, before any await: the request-log row may be finalized right after the stream ends.
+  if (!entry.timestamp) entry.timestamp = new Date().toISOString();
+  recordUsageForRequestLog(entry);
   try {
     const db = await getAdapter();
 
-    if (!entry.timestamp) entry.timestamp = new Date().toISOString();
     entry.cost = await calculateCost(entry.provider, entry.model, entry.tokens);
 
     const tokens = entry.tokens || {};
