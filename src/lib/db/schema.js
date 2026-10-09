@@ -86,6 +86,10 @@ export const TABLES = {
       // JSON arrays; NULL/empty = unrestricted
       allowedModels: "TEXT",
       allowedEndpoints: "TEXT",
+      // Per-key access control. Additive columns, picked up by
+      // syncSchemaFromTables() on boot; existing rows read as unrestricted (0).
+      accessRestricted: "INTEGER DEFAULT 0",
+      accessAllow: "TEXT",
     },
     indexes: ["CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)"],
   },
