@@ -1,7 +1,9 @@
-# v0.5.110 (2026-10-25)
+# v0.5.111 (2026-10-26)
 
 ## Features
 - **Perch AI**: add Perch AI provider support (`perchai` / `perch`) with Supabase PKCE OAuth, API Key/Bearer tokens, auto-detection of `~/.perch/cli-auth-session.json`, 40 frontier and roost tier models, and Perch CLI tool card
+
+# v0.5.110 (2026-10-25)
 
 ## Fixes
 - **CodeBuddy**: send `X-Conversation-*` header family (`X-Conversation-ID`, `X-Conversation-Request-ID`, `X-Root-Request-ID`, `X-Conversation-Message-ID`, `X-Request-ID`) to pass upstream channel verification gate (HTTP 400 code 11128 "conversation id missing") across `codebuddy-intl` and `codebuddy-cn` (#381, #5005)
