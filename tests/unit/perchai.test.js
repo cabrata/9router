@@ -15,7 +15,7 @@ import {
   resolvePerchToken,
 } from "open-sse/executors/perchai.js";
 import perchaiOAuth from "@/lib/oauth/providers/perchai.js";
-import { OAUTH_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers.js";
+import { OAUTH_PROVIDERS, ALIAS_TO_ID, AI_PROVIDERS } from "@/shared/constants/providers.js";
 import { AI_MODELS } from "@/shared/constants/models.js";
 import { resolveCaps } from "@/shared/hooks/useModelCaps.js";
 import { matchesSearch } from "@/shared/utils/modelSearchFilter.js";
@@ -426,5 +426,13 @@ describe("Perch AI Provider Integration", () => {
     expect(deepseekLevels).toBeDefined();
     expect(deepseekLevels.length).toBeGreaterThan(0);
     expect(deepseekLevels).toContain("high");
+  });
+
+  it("includes perchai in AI_PROVIDERS with dual auth modes", () => {
+    const entry = AI_PROVIDERS["perchai"];
+    expect(entry).toBeDefined();
+    expect(entry.name).toBe("Perch AI");
+    expect(entry.hasOAuth).toBe(true);
+    expect(entry.authModes).toEqual(["oauth", "apikey"]);
   });
 });
