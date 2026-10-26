@@ -1,6 +1,6 @@
 import http from "http";
 import { URL } from "url";
-import { CODEX_CONFIG, TRAE_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
+import { CODEX_CONFIG, TRAE_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG, PERCHAI_CONFIG } from "../constants/oauth.js";
 
 // Loopback origin guard for local callback proxies.
 // Legit OAuth redirects are top-level navigations (no `Origin` header); a cross-site
@@ -970,4 +970,163 @@ export function stopXiaomiMimoProxy() {
   // accumulate for the process lifetime (one per /authorize call).
   xiaomiMimoSessions.clear();
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Perch AI dynamic-port proxy.
+// Listens on 127.0.0.1:<random_port>/callback (matches Supabase redirectHost).
+// ───────────────────────────────────────────────────────────────────────────
+
+let perchaiProxyServer = null;
+let perchaiProxyTimeout = null;
+let perchaiProxyPort = null;
+let perchaiSession = null;
+
+export function registerPerchaiSession({ state, codeVerifier, redirectUri }) {
+  if (!state) return false;
+  perchaiSession = {
+    state,
+    codeVerifier: codeVerifier || null,
+    redirectUri: redirectUri || null,
+    status: "pending",
+    createdAt: Date.now(),
+  };
+  return true;
+}
+
+export function getPerchaiSessionStatus(state) {
+  if (!perchaiSession) return null;
+  if (state && perchaiSession.state !== state) return null;
+  return perchaiSession;
+}
+
+export function clearPerchaiSession(state) {
+  if (!state || (perchaiSession && perchaiSession.state === state)) perchaiSession = null;
+}
+
+export function startPerchaiProxy() {
+  return new Promise((resolve) => {
+    if (perchaiProxyServer) {
+      if (perchaiProxyTimeout) clearTimeout(perchaiProxyTimeout);
+      perchaiProxyTimeout = setTimeout(() => stopPerchaiProxy(), PERCHAI_CONFIG.oauthTimeoutMs || 300_000);
+      resolve({
+        success: true,
+        port: perchaiProxyPort,
+        callbackUrl: `http://127.0.0.1:${perchaiProxyPort}${PERCHAI_CONFIG.callbackPath || "/callback"}`,
+      });
+      return;
+    }
+
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url, "http://127.0.0.1");
+      const validPath = PERCHAI_CONFIG.callbackPath || "/callback";
+      if (url.pathname !== validPath && url.pathname !== "/callback") {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+
+      const session = perchaiSession;
+      if (!session) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "No active Perch AI login session"));
+        return;
+      }
+
+      if (!isLoopbackOrigin(req.headers.origin)) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "Cross-origin callback rejected"));
+        return;
+      }
+
+      const cbState = url.searchParams.get("state");
+      if (cbState && session.state && cbState !== session.state) {
+        session.status = "error";
+        session.error = "Perch AI callback state mismatch";
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, session.error));
+        stopPerchaiProxy();
+        return;
+      }
+
+      const errorParam = url.searchParams.get("error_description") || url.searchParams.get("error");
+      if (errorParam) {
+        session.status = "error";
+        session.error = errorParam;
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, errorParam));
+        stopPerchaiProxy();
+        return;
+      }
+
+      const code = url.searchParams.get("code");
+      if (!code) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "No authorization code in Perch AI callback"));
+        return;
+      }
+
+      try {
+        const { exchangeTokens } = await import("../providers.js");
+        const { createProviderConnection } = await import("@/models");
+        const redirectUri = session.redirectUri || `http://127.0.0.1:${perchaiProxyPort}${validPath}`;
+        const tokenData = await exchangeTokens(
+          "perchai",
+          code,
+          redirectUri,
+          session.codeVerifier,
+          session.state,
+        );
+
+        const connection = await createProviderConnection({
+          provider: "perchai",
+          authType: "oauth",
+          ...tokenData,
+          expiresAt: tokenData.expiresIn
+            ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+            : null,
+          testStatus: "active",
+        });
+
+        session.status = "done";
+        session.connectionId = connection.id;
+        session.email = connection.email;
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(true, "Signed in with Perch AI! You can close this window."));
+      } catch (err) {
+        session.status = "error";
+        session.error = err.message;
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, err.message));
+      } finally {
+        stopPerchaiProxy();
+      }
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      perchaiProxyServer = server;
+      perchaiProxyPort = server.address().port;
+      perchaiProxyTimeout = setTimeout(() => stopPerchaiProxy(), PERCHAI_CONFIG.oauthTimeoutMs || 300_000);
+      resolve({
+        success: true,
+        port: perchaiProxyPort,
+        callbackUrl: `http://127.0.0.1:${perchaiProxyPort}${PERCHAI_CONFIG.callbackPath || "/callback"}`,
+      });
+    });
+
+    server.on("error", (err) => resolve({ success: false, reason: err.message }));
+  });
+}
+
+export function stopPerchaiProxy() {
+  if (perchaiProxyTimeout) {
+    clearTimeout(perchaiProxyTimeout);
+    perchaiProxyTimeout = null;
+  }
+  if (perchaiProxyServer) {
+    perchaiProxyServer.close();
+    perchaiProxyServer = null;
+  }
+  perchaiProxyPort = null;
+}
+
 

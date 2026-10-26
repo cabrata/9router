@@ -40,6 +40,11 @@ import {
   registerXiaomiMimoSession,
   getXiaomiMimoSessionStatus,
   clearXiaomiMimoSession,
+  startPerchaiProxy,
+  stopPerchaiProxy,
+  registerPerchaiSession,
+  getPerchaiSessionStatus,
+  clearPerchaiSession,
 } from "@/lib/oauth/utils/server";
 import { detectIdeInstalled } from "@/lib/oauth/utils/ideDetect";
 import { ZED_HOSTED_CONFIG } from "@/lib/oauth/constants/oauth";
@@ -157,6 +162,10 @@ export async function GET(request, { params }) {
         const result = await startXiaomiMimoProxy();
         return NextResponse.json(result);
       }
+      if (provider === "perchai") {
+        const result = await startPerchaiProxy();
+        return NextResponse.json(result);
+      }
       if (!["codex", "xai"].includes(provider)) {
         return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed" }, { status: 400 });
       }
@@ -191,7 +200,8 @@ export async function GET(request, { params }) {
       else if (provider === "xai") session = getXaiSessionStatus(state);
       else if (provider === "codex") session = getCodexSessionStatus(state);
       else if (provider === "xiaomi-mimo") session = getXiaomiMimoSessionStatus(state);
-      else return NextResponse.json({ error: "Poll only supported for codex/xai/trae/windsurf/zed/xiaomi-mimo" }, { status: 400 });
+      else if (provider === "perchai") session = getPerchaiSessionStatus(state);
+      else return NextResponse.json({ error: "Poll only supported for codex/xai/trae/windsurf/zed/xiaomi-mimo/perchai" }, { status: 400 });
       if (!session) return NextResponse.json({ status: "unknown" });
       if (session.status === "done" || session.status === "error") {
         const payload = { ...session };
@@ -209,6 +219,7 @@ export async function GET(request, { params }) {
         else if (provider === "windsurf") clearWindsurfSession(state);
         else if (provider === "zed") clearZedSession(state);
         else if (provider === "xai") clearXaiSession(state);
+        else if (provider === "perchai") clearPerchaiSession(state);
         else clearCodexSession(state);
         return NextResponse.json(payload);
       }
@@ -222,14 +233,20 @@ export async function GET(request, { params }) {
       else if (provider === "xai") stopXaiProxy();
       else if (provider === "codex") stopCodexProxy();
       else if (provider === "xiaomi-mimo") stopXiaomiMimoProxy();
-      else return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/xiaomi-mimo" }, { status: 400 });
+      else if (provider === "perchai") stopPerchaiProxy();
+      else return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/xiaomi-mimo/perchai" }, { status: 400 });
       return NextResponse.json({ success: true });
     }
 
     if (action === "ide-status") {
+      if (provider === "perchai") {
+        const { detectPerchCliInstalled } = await import("@/lib/oauth/utils/perchCliCredentials");
+        const status = await detectPerchCliInstalled();
+        return NextResponse.json(status);
+      }
       // Detect whether the IDE is installed locally (used by import-token UX).
       if (provider !== "trae" && provider !== "windsurf") {
-        return NextResponse.json({ error: "ide-status only supported for trae/windsurf" }, { status: 400 });
+        return NextResponse.json({ error: "ide-status only supported for trae/windsurf/perchai" }, { status: 400 });
       }
       const status = await detectIdeInstalled(provider);
       return NextResponse.json(status);
@@ -314,7 +331,8 @@ export async function POST(request, { params }) {
       if (provider === "trae") ok = registerTraeSession({ state });
       else if (provider === "windsurf") ok = registerWindsurfSession({ state });
       else if (provider === "zed") ok = registerZedSession({ state, codeVerifier: body?.codeVerifier, systemId: body?.systemId });
-      else return NextResponse.json({ error: "register-session only supported for trae/windsurf/zed" }, { status: 400 });
+      else if (provider === "perchai") ok = registerPerchaiSession({ state, codeVerifier: body?.codeVerifier, redirectUri: body?.redirectUri });
+      else return NextResponse.json({ error: "register-session only supported for trae/windsurf/zed/perchai" }, { status: 400 });
       return NextResponse.json({ success: ok });
     }
 
@@ -379,6 +397,44 @@ export async function POST(request, { params }) {
         } catch (err) {
           clearXiaomiMimoSession(state);
           stopXiaomiMimoProxy();
+          return NextResponse.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // Perch AI: handles PKCE code, full callback URL, raw JWT, or JSON from cli-auth-session.json
+      if (provider === "perchai") {
+        const rawCode = typeof code === "string" ? code.trim() : "";
+        if (!rawCode) {
+          return NextResponse.json({ error: "Missing token or authorization code" }, { status: 400 });
+        }
+        try {
+          const tokenData = await exchangeTokens(
+            "perchai",
+            rawCode,
+            redirectUri,
+            codeVerifier,
+            state,
+            meta,
+          );
+          const connection = await createProviderConnection({
+            provider: "perchai",
+            authType: "oauth",
+            ...tokenData,
+            expiresAt: tokenData.expiresIn
+              ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+              : null,
+            testStatus: "active",
+          });
+          return NextResponse.json({
+            success: true,
+            connection: {
+              id: connection.id,
+              provider: connection.provider,
+              email: connection.email,
+              displayName: connection.displayName,
+            },
+          });
+        } catch (err) {
           return NextResponse.json({ error: err.message }, { status: 500 });
         }
       }

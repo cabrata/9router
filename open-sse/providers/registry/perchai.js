@@ -80,6 +80,8 @@ export default {
     authorizeUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/authorize",
     tokenUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=pkce",
     refreshUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=refresh_token",
+    callbackPath: "/callback",
+    oauthTimeoutMs: 300000,
   },
   features: {
     usage: true,

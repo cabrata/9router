@@ -27,6 +27,14 @@ import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/
 import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 import { normalizeProviderId } from "@/lib/providerNormalization.js";
+import {
+  startPerchaiProxy,
+  stopPerchaiProxy,
+  registerPerchaiSession,
+  getPerchaiSessionStatus,
+  clearPerchaiSession,
+} from "@/lib/oauth/utils/server.js";
+import { readPerchCliCredentials, detectPerchCliInstalled } from "@/lib/oauth/utils/perchCliCredentials.js";
 
 const originalFetch = global.fetch;
 
@@ -151,6 +159,16 @@ describe("Perch AI Provider Integration", () => {
     );
     expect(authUrl).toContain("provider=google");
     expect(authUrl).toContain("code_challenge=test_challenge");
+    expect(authUrl).toContain("prompt=select_account");
+
+    const githubAuthUrl = perchaiOAuth.buildAuthUrl(
+      { authorizeUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/authorize" },
+      "http://127.0.0.1:20127/callback",
+      "test_state",
+      "test_challenge",
+      { socialProvider: "github" }
+    );
+    expect(githubAuthUrl).toContain("provider=github");
 
     const mapped = perchaiOAuth.mapTokens({
       access_token: "jwt_token_123",
@@ -162,6 +180,117 @@ describe("Perch AI Provider Integration", () => {
     expect(mapped.refreshToken, "refresh_token_456");
     expect(mapped.email, "user@perchai.app");
     expect(mapped.providerSpecificData.userId, "uid_1");
+  });
+
+  it("exchanges token flexibly from callback URL, raw JWT, and cli session JSON", async () => {
+    // 1. JSON session (from ~/.perch/cli-auth-session.json)
+    const jsonSession = JSON.stringify({
+      version: 1,
+      accessToken: "session_jwt_abc",
+      refreshToken: "session_refresh_def",
+      userId: "u123",
+      email: "cli@perchai.app",
+    });
+    const parsedJson = await perchaiOAuth.exchangeToken({}, jsonSession);
+    expect(parsedJson.accessToken).toBe("session_jwt_abc");
+    const mappedJson = perchaiOAuth.mapTokens(parsedJson);
+    expect(mappedJson.accessToken).toBe("session_jwt_abc");
+    expect(mappedJson.email).toBe("cli@perchai.app");
+
+    // 2. Direct JWT token paste
+    const jwtToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1NDU2IiwiZW1haWwiOiJqd3RAcGVyY2guYXBwIn0.sig";
+    const parsedJwt = await perchaiOAuth.exchangeToken({}, jwtToken);
+    expect(parsedJwt.access_token).toBe(jwtToken);
+    const mappedJwt = perchaiOAuth.mapTokens(parsedJwt);
+    expect(mappedJwt.accessToken).toBe(jwtToken);
+    expect(mappedJwt.email).toBe("jwt@perch.app");
+
+    // 3. Callback URL with code query param
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          access_token: "exchanged_jwt_789",
+          refresh_token: "exchanged_refresh_012",
+          expires_in: 3600,
+          user: { id: "u789", email: "callback@perch.app" },
+        }),
+    });
+    global.fetch = fetchMock;
+
+    const res = await perchaiOAuth.exchangeToken(
+      {
+        tokenUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=pkce",
+        supabaseAnonKey: "anon_key_test",
+      },
+      "http://127.0.0.1:54321/callback?code=auth_code_xyz",
+      "http://127.0.0.1:54321/callback",
+      "test_verifier_123"
+    );
+    expect(res.access_token).toBe("exchanged_jwt_789");
+    const [callUrl, callInit] = fetchMock.mock.calls[0];
+    expect(callUrl).toContain("grant_type=pkce");
+    const body = JSON.parse(callInit.body);
+    expect(body.auth_code).toBe("auth_code_xyz");
+    expect(body.code_verifier).toBe("test_verifier_123");
+  });
+
+  it("manages perchai proxy server lifecycle and session registry", async () => {
+    const state = "test_proxy_state_" + Date.now();
+    expect(registerPerchaiSession({ state, codeVerifier: "cv_1", redirectUri: "http://127.0.0.1:1234/callback" })).toBe(true);
+
+    const session = getPerchaiSessionStatus(state);
+    expect(session).not.toBeNull();
+    expect(session.state).toBe(state);
+    expect(session.codeVerifier).toBe("cv_1");
+
+    const proxy = await startPerchaiProxy();
+    expect(proxy.success).toBe(true);
+    expect(proxy.port).toBeGreaterThan(0);
+    expect(proxy.callbackUrl).toContain("127.0.0.1");
+    expect(proxy.callbackUrl).toContain("/callback");
+
+    stopPerchaiProxy();
+    clearPerchaiSession(state);
+    expect(getPerchaiSessionStatus(state)).toBeNull();
+  });
+
+  it("reads Perch CLI credentials and detects installed CLI session", async () => {
+    const tmpDir = path.join("/tmp", "perch-test-" + Date.now());
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const authPath = path.join(tmpDir, "cli-auth-session.json");
+    fs.writeFileSync(
+      authPath,
+      JSON.stringify({
+        version: 1,
+        appUrl: "https://app.perchai.app",
+        accessToken: "cli_disk_token",
+        refreshToken: "cli_disk_refresh",
+        email: "disk_user@perchai.app",
+        userId: "uid_disk_99",
+        expiresAt: Math.floor(Date.now() / 1000) + 7200,
+      })
+    );
+
+    const oldEnv = process.env.PERCH_CLI_AUTH_DIR;
+    process.env.PERCH_CLI_AUTH_DIR = tmpDir;
+    try {
+      const creds = await readPerchCliCredentials();
+      expect(creds.found).toBe(true);
+      expect(creds.accessToken).toBe("cli_disk_token");
+      expect(creds.email).toBe("disk_user@perchai.app");
+      expect(creds.userId).toBe("uid_disk_99");
+
+      const status = await detectPerchCliInstalled();
+      expect(status.hasSession).toBe(true);
+      expect(status.installed).toBe(true);
+      expect(status.session.email).toBe("disk_user@perchai.app");
+    } finally {
+      if (oldEnv) process.env.PERCH_CLI_AUTH_DIR = oldEnv;
+      else delete process.env.PERCH_CLI_AUTH_DIR;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("refreshes token via Supabase OAuth refresh profile", async () => {

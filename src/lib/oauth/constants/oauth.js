@@ -235,8 +235,12 @@ export const NOUS_CONFIG = {
   scope: "inference:invoke inference:mint_agent_key",
 };
 
-// Perch AI OAuth Configuration (Supabase PKCE OAuth)
-export const PERCHAI_CONFIG = { ...PROVIDER_OAUTH["perchai"] };
+// Perch AI OAuth Configuration (Supabase PKCE OAuth with local proxy callback)
+export const PERCHAI_CONFIG = {
+  callbackPath: "/callback",
+  oauthTimeoutMs: 300_000,
+  ...PROVIDER_OAUTH["perchai"],
+};
 
 // OAuth timeout (5 minutes)
 export const OAUTH_TIMEOUT = 300000;

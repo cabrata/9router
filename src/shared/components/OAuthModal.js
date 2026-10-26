@@ -7,11 +7,19 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 // Providers using the dynamic-port local callback proxy.
 // Browser OAuth: popup → auto callback → auto exchange → poll-status.
-const PROXY_OAUTH_PROVIDERS = new Set(["trae", "windsurf", "zed"]);
+const PROXY_OAUTH_PROVIDERS = new Set(["trae", "windsurf", "zed", "perchai"]);
 
 // Providers offering a paste-token fallback (import-token flow).
 // UX warns if the IDE (which issues the token) is not installed.
 const PASTE_TOKEN_PROVIDERS = {
+  perchai: {
+    label: "Perch CLI Token or Session",
+    instructions:
+      "Sign in with `npm i -g perchai-cli && perch login` in your terminal, then paste your access token or ~/.perch/cli-auth-session.json below (or use the one-click import button above).",
+    placeholder: "Paste access token or ~/.perch/cli-auth-session.json content...",
+    ideName: "Perch CLI",
+    ideOptional: true,
+  },
   trae: {
     label: "Cloud-IDE-JWT",
     instructions:
@@ -240,6 +248,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     //    + systemId; sent via POST body so secrets never land in URL/query logs.
     const regBody = { state: authData.state };
     if (authData.codeVerifier) regBody.codeVerifier = authData.codeVerifier;
+    if (authData.redirectUri) regBody.redirectUri = authData.redirectUri;
     if (authData.systemId) regBody.systemId = authData.systemId;
     const regRes = await fetch(`/api/oauth/${providerId}/register-session`, {
       method: "POST",
@@ -654,6 +663,23 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     };
   }, [authData, exchangeTokens]);
 
+  const handleImportCliSession = useCallback(async () => {
+    try {
+      setError(null);
+      const res = await fetch(`/api/oauth/${provider}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ideStatus?.session || {}),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Import failed");
+      setStep("success");
+      onSuccessRef.current?.();
+    } catch (err) {
+      setError(err.message);
+    }
+  }, [provider, ideStatus]);
+
   // Handle manual URL input
   const handleManualSubmit = async () => {
     try {
@@ -764,9 +790,25 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   return (
     <Modal isOpen={isOpen} title={modalTitle} onClose={handleClose} size="lg">
       <div className="flex flex-col gap-4">
-        {/* Proxy OAuth (trae/windsurf/zed): browser flow; paste-token only when configured */}
+        {/* Proxy OAuth (trae/windsurf/zed/perchai): browser flow; paste-token only when configured */}
         {PROXY_OAUTH_PROVIDERS.has(provider) && (step === "waiting" || step === "input" || step === "error") && (
           <>
+            {ideStatus?.hasSession && (
+              <div className="flex items-center justify-between p-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10">
+                <div>
+                  <div className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                    Perch CLI session detected
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    {ideStatus.session?.email ? `Signed in as ${ideStatus.session.email}` : "Found in ~/.perch/cli-auth-session.json"}
+                  </div>
+                </div>
+                <Button size="sm" variant="primary" onClick={handleImportCliSession}>
+                  Import CLI Session
+                </Button>
+              </div>
+            )}
+
             {PASTE_TOKEN_PROVIDERS[provider] && (
               <div className="flex gap-2">
                 <button
