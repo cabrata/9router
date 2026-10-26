@@ -408,6 +408,36 @@ amp --model "{{model}}"
       { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", alias: "gemini", defaultValue: "gemini/gemini-3.1-pro" },
     ],
   },
+  perch: {
+    id: "perch",
+    name: "Perch CLI",
+    image: "/providers/perchai.png",
+    color: "#22C55E",
+    description: "Perch AI Operator terminal assistant",
+    configType: "custom",
+    docsUrl: "https://perchai.app",
+    notes: [
+      {
+        type: "info",
+        text: "Perch CLI connects to Perch AI verification and inference backend.",
+      },
+      {
+        type: "info",
+        text: "Authenticate with `perch login` or use your Perch access token in 9Router.",
+      },
+      {
+        type: "warning",
+        text: "Install Perch CLI via: npm install -g perchai-cli",
+      },
+    ],
+    defaultModels: [
+      { id: "standard", name: "Standard (Auto)", alias: "standard", defaultValue: "perch/standard" },
+      { id: "pro", name: "Pro (Auto)", alias: "pro", defaultValue: "perch/pro" },
+      { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", alias: "gpt6", defaultValue: "perch/gpt-6.1-sol" },
+      { id: "claude-opus-5.5", name: "Claude Opus 5.5", alias: "opus", defaultValue: "perch/claude-opus-5.5" },
+      { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", alias: "deepseek", defaultValue: "perch/deepseek-v4.1-flash" },
+    ],
+  },
   "grok-build": {
     id: "grok-build",
     name: "Grok Build",

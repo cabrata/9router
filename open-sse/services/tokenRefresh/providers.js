@@ -56,6 +56,15 @@ const REFRESH_PROFILES = {
     dedupKey: "kimi",
     extraHeaders: (creds) => buildKimiHeaders(creds?.providerSpecificData?.deviceId),
   },
+  perchai: {
+    bodyFormat: "json",
+    includeClientSecret: false,
+    url: () => "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=refresh_token",
+    extraHeaders: () => ({
+      apikey: "sb_publishable_w4R_pNkUpygBFIljZCoOlA_67ACg0FO",
+    }),
+    dedupKey: "perchai",
+  },
 };
 
 function resolveRefreshUrl(provider, config, profile) {
