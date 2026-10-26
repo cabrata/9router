@@ -1,7 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import {
+  getCapabilitiesForModel,
+  parseOpenAIModelCapabilities,
+  registerCustomModelCapabilities,
+} from "../../open-sse/providers/capabilities.js";
 
 describe("getCapabilitiesForModel", () => {
+
+  it("uses OpenAI-compatible /models limits without leaking across providers", () => {
+    const srbyte = parseOpenAIModelCapabilities({
+      id: "auto",
+      context_length: 1050000,
+      max_output_tokens: 128000,
+      attachment: true,
+      modalities: { input: ["text", "image"] },
+    });
+    expect(srbyte).toMatchObject({ contextWindow: 1050000, maxOutput: 128000, vision: true });
+
+    registerCustomModelCapabilities("srbyte", "auto", srbyte);
+    expect(getCapabilitiesForModel("srbyte", "auto")).toMatchObject({
+      contextWindow: 1050000,
+      maxOutput: 128000,
+      vision: true,
+    });
+    expect(getCapabilitiesForModel("unrelated-compatible", "auto")).toMatchObject({
+      contextWindow: 200000,
+      maxOutput: 64000,
+      vision: false,
+    });
+  });
 
   it("reports DeepSeek V4.1-Flash ids as vision-capable without dropping their thinking/context", () => {
     const v41 = { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 };

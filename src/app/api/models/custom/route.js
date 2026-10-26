@@ -1,16 +1,38 @@
 import { NextResponse } from "next/server";
 import { getCustomModels, addCustomModel, deleteCustomModel } from "@/models";
 import { CAPACITY_META, isSttTransport } from "@/shared/constants/models";
+import { registerCustomModelCapabilities } from "open-sse/providers/capabilities.js";
 
 export const dynamic = "force-dynamic";
 
-// Whitelist capability keys to boolean values — ignore anything else
+// Whitelist capability keys and numeric limits (context window, max output)
 function sanitizeCaps(caps) {
   if (!caps || typeof caps !== "object") return null;
   const clean = {};
   for (const key of Object.keys(CAPACITY_META)) {
     if (typeof caps[key] === "boolean") clean[key] = caps[key];
   }
+  if (typeof caps.search === "boolean") clean.search = caps.search;
+  if (typeof caps.tools === "boolean") clean.tools = caps.tools;
+  const ctx = Number(
+    caps.contextWindow ??
+    caps.contextLength ??
+    caps.context_length ??
+    caps.context_window ??
+    caps.context_window_tokens ??
+    caps.max_context_length ??
+    caps.max_model_len
+  );
+  if (Number.isFinite(ctx) && ctx > 0) clean.contextWindow = Math.floor(ctx);
+  const out = Number(
+    caps.maxOutput ??
+    caps.maxOutputTokens ??
+    caps.max_output_tokens ??
+    caps.maximum_output_tokens ??
+    caps.max_tokens ??
+    caps.maxTokens
+  );
+  if (Number.isFinite(out) && out > 0) clean.maxOutput = Math.floor(out);
   return Object.keys(clean).length ? clean : null;
 }
 
@@ -45,6 +67,9 @@ export async function POST(request) {
     const cleanCaps = sanitizeCaps(caps);
     const cleanTransport = sanitizeTransport(transport, type || "llm");
     const added = await addCustomModel({ providerAlias, id, type: type || "llm", name, ...(cleanCaps ? { caps: cleanCaps } : {}), ...(cleanTransport ? { transport: cleanTransport } : {}) });
+    if (cleanCaps) {
+      registerCustomModelCapabilities(providerAlias, id, cleanCaps);
+    }
     return NextResponse.json({ success: true, added });
   } catch (error) {
     console.log("Error adding custom model:", error);

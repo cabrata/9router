@@ -145,7 +145,44 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
         const modelId = model.id || model.name || model.model;
         if (!modelId) continue;
         if (allModels.some((entry) => entry.id === modelId)) continue;
-        await onAddCustomModel(modelId);
+        const ctx = Number(
+          model.context_length ??
+          model.contextLength ??
+          model.context_window ??
+          model.contextWindow ??
+          model.context_window_tokens ??
+          model.max_context_length ??
+          model.max_model_len ??
+          model.limit?.context
+        );
+        const out = Number(
+          model.max_output_tokens ??
+          model.maxOutputTokens ??
+          model.maximum_output_tokens ??
+          model.max_tokens ??
+          model.maxTokens ??
+          model.limit?.output
+        );
+        const hasVision = Boolean(
+          model.attachment ||
+          model.modalities?.input?.includes?.("image") ||
+          model.capabilities?.vision ||
+          model.isVL ||
+          model.supports_vision
+        );
+        const hasReasoning = Boolean(
+          model.capabilities?.reasoning ||
+          model.isReasoning ||
+          model.reasoning ||
+          model.supports_reasoning
+        );
+        const caps = {};
+        if (Number.isFinite(ctx) && ctx > 0) caps.contextWindow = Math.floor(ctx);
+        if (Number.isFinite(out) && out > 0) caps.maxOutput = Math.floor(out);
+        if (hasVision) caps.vision = true;
+        if (hasReasoning) caps.reasoning = true;
+
+        await onAddCustomModel(modelId, Object.keys(caps).length ? caps : undefined);
         importedCount += 1;
       }
       if (importedCount === 0) {

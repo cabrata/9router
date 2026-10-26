@@ -21,7 +21,7 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities, parseOpenAIModelCapabilities, registerCustomModelCapabilities } from "open-sse/providers/capabilities.js";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
 // credentials carry the provider id so qoderModels picks the right region's
@@ -200,7 +200,7 @@ function inferKindFromUnknownModelId(modelId) {
   return LLM_KIND;
 }
 
-async function fetchCompatibleModelIds(connection) {
+async function fetchCompatibleModels(connection) {
   if (!connection?.apiKey) return [];
 
   const baseUrl = typeof connection?.providerSpecificData?.baseUrl === "string"
@@ -230,31 +230,29 @@ async function fetchCompatibleModelIds(connection) {
   }
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
     const response = await fetch(url, {
       method: "GET",
       headers: { ...headers, [INTERNAL_MODELS_FETCH_HEADER]: "1" },
       cache: "no-store",
-      signal: controller.signal,
+      signal: AbortSignal.timeout(5000),
     });
-    clearTimeout(timeoutId);
-
     if (!response.ok) return [];
 
-    const data = await response.json();
-    const rawModels = parseOpenAIStyleModels(data);
-
-    return Array.from(
-      new Set(
-        rawModels
-          .map((model) => model?.id || model?.name || model?.model)
-          .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "")
-      )
-    );
+    const rawModels = parseOpenAIStyleModels(await response.json());
+    const seen = new Set();
+    return rawModels.filter((model) => {
+      const modelId = model?.id || model?.name || model?.model;
+      if (typeof modelId !== "string" || !modelId.trim() || seen.has(modelId)) return false;
+      seen.add(modelId);
+      return true;
+    });
   } catch {
     return [];
   }
+}
+
+async function fetchCompatibleModelIds(connection) {
+  return (await fetchCompatibleModels(connection)).map((model) => model.id || model.name || model.model);
 }
 
 // Provider matches kindFilter when its serviceKinds intersect the requested kinds.
@@ -365,6 +363,30 @@ export async function buildModelsList(kindFilter, options = {}) {
   for (const conn of connections) {
     if (!activeConnectionByProvider.has(conn.provider)) {
       activeConnectionByProvider.set(conn.provider, conn);
+    }
+  }
+
+  // Prime OpenAI-compatible capabilities before combos are aggregated. These
+  // providers often publish token limits only from their live /models endpoint.
+  // Without this pass, a generic model such as srbyte/auto falls back to 200k
+  // and adding it to a 1M combo incorrectly shrinks the combo window.
+  const compatibleModelsByProvider = new Map();
+  for (const [providerId, conn] of activeConnectionByProvider.entries()) {
+    if (skipDynamicFetch || (!isOpenAICompatibleProvider(providerId) && !isAnthropicCompatibleProvider(providerId))) continue;
+    const liveModels = await fetchCompatibleModels(conn);
+    compatibleModelsByProvider.set(providerId, liveModels);
+    const outputAlias = (conn?.providerSpecificData?.prefix || getProviderAlias(providerId) || providerId).trim();
+    for (const model of liveModels) {
+      const modelId = model?.id || model?.name || model?.model;
+      const caps = parseOpenAIModelCapabilities(model);
+      if (!modelId || !caps) continue;
+      registerCustomModelCapabilities(providerId, modelId, caps);
+      if (outputAlias !== providerId) registerCustomModelCapabilities(outputAlias, modelId, caps);
+    }
+  }
+  for (const model of customModels) {
+    if (model?.providerAlias && model?.id && model?.caps) {
+      registerCustomModelCapabilities(model.providerAlias, model.id, model.caps);
     }
   }
 
@@ -479,7 +501,10 @@ export async function buildModelsList(kindFilter, options = {}) {
         : providerModels.map((model) => model.id);
 
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
-        rawModelIds = await fetchCompatibleModelIds(conn);
+        const compatibleModels = compatibleModelsByProvider.get(providerId) || [];
+        rawModelIds = compatibleModels.length
+          ? compatibleModels.map((model) => model.id || model.name || model.model)
+          : await fetchCompatibleModelIds(conn);
       }
 
       // Config-driven live catalog override (e.g. Kiro returns dynamic

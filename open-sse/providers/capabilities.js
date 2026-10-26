@@ -712,6 +712,105 @@ const MODALITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
 // would keep a reader alive in other copies after setCatalogSource(null).
 let catalogSource = null;
 
+// Runtime registry for custom & OpenAI-compatible model capabilities.
+// Synchronous lookup used by getCapabilitiesForModel across all server & bundle contexts.
+function getCustomCapsRegistry() {
+  if (typeof globalThis !== "undefined") {
+    if (!globalThis.__9rCustomModelCaps) globalThis.__9rCustomModelCaps = new Map();
+    return globalThis.__9rCustomModelCaps;
+  }
+  if (!catalogSource?.__customCaps) catalogSource = { ...(catalogSource || {}), __customCaps: new Map() };
+  return catalogSource.__customCaps;
+}
+
+export function parseOpenAIModelCapabilities(model) {
+  if (!model || typeof model !== "object") return null;
+
+  const ctx = Number(
+    model.context_length ??
+    model.contextLength ??
+    model.context_window ??
+    model.contextWindow ??
+    model.context_window_tokens ??
+    model.max_context_length ??
+    model.max_model_len ??
+    model.max_input_tokens ??
+    model.limit?.context
+  );
+
+  const out = Number(
+    model.max_output_tokens ??
+    model.maxOutputTokens ??
+    model.maxOutput ??
+    model.maximum_output_tokens ??
+    model.max_tokens ??
+    model.maxTokens ??
+    model.limit?.output
+  );
+
+  const vision = Boolean(
+    model.vision ||
+    model.attachment ||
+    model.modalities?.input?.includes?.("image") ||
+    model.capabilities?.vision ||
+    model.isVL ||
+    model.supports_vision
+  );
+
+  const reasoning = Boolean(
+    model.capabilities?.reasoning ||
+    model.isReasoning ||
+    model.reasoning ||
+    model.supports_reasoning
+  );
+
+  const tools = (model.supports_tools !== undefined || model.tools !== undefined || model.capabilities?.tools !== undefined)
+    ? Boolean(model.supports_tools ?? model.tools ?? model.capabilities?.tools)
+    : undefined;
+
+  const caps = {};
+  if (Number.isFinite(ctx) && ctx > 0) caps.contextWindow = Math.floor(ctx);
+  if (Number.isFinite(out) && out > 0) caps.maxOutput = Math.floor(out);
+  if (vision) caps.vision = true;
+  if (reasoning) caps.reasoning = true;
+  if (tools !== undefined) caps.tools = tools;
+
+  return Object.keys(caps).length > 0 ? caps : null;
+}
+
+export function registerCustomModelCapabilities(provider, model, caps) {
+  if (!model || !caps) return;
+  const parsed = parseOpenAIModelCapabilities(caps) || (typeof caps === "object" ? caps : null);
+  if (!parsed) return;
+
+  const registry = getCustomCapsRegistry();
+  const m = String(model).trim().toLowerCase();
+  const base = m.includes("/") ? m.split("/").pop() : m;
+  const p = provider ? String(provider).trim().toLowerCase() : null;
+
+  if (p) {
+    registry.set(`${p}:${m}`, parsed);
+    registry.set(`${p}:${base}`, parsed);
+  } else {
+    registry.set(m, parsed);
+    registry.set(base, parsed);
+  }
+}
+
+export function getCustomModelCapabilities(provider, model) {
+  if (!model) return null;
+  const registry = getCustomCapsRegistry();
+  const m = String(model).trim().toLowerCase();
+  const base = m.includes("/") ? m.split("/").pop() : m;
+  const p = provider ? String(provider).trim().toLowerCase() : (model.includes("/") ? model.split("/")[0].toLowerCase() : null);
+
+  if (p) {
+    const direct = registry.get(`${p}:${m}`) || registry.get(`${p}:${base}`);
+    if (direct) return direct;
+  }
+  return registry.get(m) || registry.get(base) || null;
+}
+
 /**
  * Install the synced catalog reader (server only).
  * @param {{ getModalities: (provider: string, model: string) => object|null,
@@ -732,6 +831,15 @@ function getCatalogSource() {
 // flips when an outside source positively declares support.
 function refine(base, provider, model) {
   const result = { ...DEFAULT_CAPABILITIES, ...base };
+
+  const custom = getCustomModelCapabilities(provider, model);
+  if (custom) {
+    if (custom.contextWindow > 0) result.contextWindow = custom.contextWindow;
+    if (custom.maxOutput > 0) result.maxOutput = custom.maxOutput;
+    if (custom.vision) result.vision = true;
+    if (custom.reasoning) result.reasoning = true;
+    if (custom.tools !== undefined) result.tools = custom.tools;
+  }
 
   const source = getCatalogSource();
   if (source) {
@@ -796,10 +904,11 @@ export function getCapabilitiesForModel(provider, model) {
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
   const baseModel = model.includes("/") ? model.split("/").pop() : model;
+  const effectiveProvider = provider || (model.includes("/") ? model.split("/")[0] : null);
 
   // CommandCode wire is /alpha/generate for every model. Family patterns
   // (deepseek-v4 → thinkingFormat:deepseek, vision:false) must not win here.
-  if (provider === "commandcode" || provider === "cmc") {
+  if (effectiveProvider === "commandcode" || effectiveProvider === "cmc") {
     const providerCaps = PROVIDER_CAPABILITIES.commandcode;
     if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model] };
     if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel] };
@@ -815,26 +924,26 @@ export function getCapabilitiesForModel(provider, model) {
   }
 
   // 1. Provider-specific override
-  if (provider) {
-    const providerCaps = PROVIDER_CAPABILITIES[provider];
+  if (effectiveProvider) {
+    const providerCaps = PROVIDER_CAPABILITIES[effectiveProvider];
     if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model] };
     if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel] };
   }
 
   // 2. Canonical exact, then catalog overlay so provider-scoped models.dev
   //    deltas still apply. Step 1 above still short-circuits.
-  if (MODEL_CAPABILITIES[baseModel]) return refine(MODEL_CAPABILITIES[baseModel], provider, model);
-  if (MODEL_CAPABILITIES[model]) return refine(MODEL_CAPABILITIES[model], provider, model);
+  if (MODEL_CAPABILITIES[baseModel]) return refine(MODEL_CAPABILITIES[baseModel], effectiveProvider, model);
+  if (MODEL_CAPABILITIES[model]) return refine(MODEL_CAPABILITIES[model], effectiveProvider, model);
 
   // 3. Pattern match (first match wins), refined by catalog + name heuristic
   for (const { pattern, caps } of PATTERN_CAPABILITIES) {
     if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
-      return refine(caps, provider, model);
+      return refine(caps, effectiveProvider, model);
     }
   }
 
   // 4. Floor
-  return refine(null, provider, model);
+  return refine(null, effectiveProvider, model);
 }
 
 // Gemini 4 (Argon) drops sampling params and requires functionResponse-last merged user turns.

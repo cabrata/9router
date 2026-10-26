@@ -9,6 +9,8 @@ const defaultCaps = () => Object.fromEntries(Object.keys(CAPACITY_META).map((key
 
 export default function AddCustomModelModal({ isOpen, providerAlias, providerDisplayAlias, onSave, onClose }) {
   const [modelId, setModelId] = useState("");
+  const [contextWindow, setContextWindow] = useState("");
+  const [maxOutput, setMaxOutput] = useState("");
   const [caps, setCaps] = useState(defaultCaps);
   const [testStatus, setTestStatus] = useState(null); // null | "testing" | "ok" | "error"
   const [testError, setTestError] = useState("");
@@ -18,7 +20,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
 
   // Reset state when modal opens
   useEffect(() => {
-    if (isOpen) { setModelId(""); setCaps(defaultCaps()); setTransport(""); setTestStatus(null); setTestError(""); }
+    if (isOpen) { setModelId(""); setContextWindow(""); setMaxOutput(""); setCaps(defaultCaps()); setTransport(""); setTestStatus(null); setTestError(""); }
   }, [isOpen]);
 
   // Strip provider's own alias prefix (e.g. "cc/model" -> "model" for cc provider)
@@ -52,9 +54,14 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
     if (!cleanId || saving) return;
     setSaving(true);
     try {
+      const finalCaps = { ...caps };
+      const parsedCtx = Number(contextWindow);
+      if (Number.isFinite(parsedCtx) && parsedCtx > 0) finalCaps.contextWindow = Math.floor(parsedCtx);
+      const parsedOut = Number(maxOutput);
+      if (Number.isFinite(parsedOut) && parsedOut > 0) finalCaps.maxOutput = Math.floor(parsedOut);
       // caps.stt is UI-only; the parent save flow derives the model type from
       // it and forwards the pinned transport (null unless the caller picked one).
-      await onSave(cleanId, caps, caps.stt ? transport : null);
+      await onSave(cleanId, finalCaps, caps.stt ? transport : null);
     } finally {
       setSaving(false);
     }
@@ -107,6 +114,29 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
                 size="sm"
               />
             ))}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="text-sm font-medium mb-1 block">Context Window (tokens)</label>
+            <input
+              type="number"
+              value={contextWindow}
+              onChange={(e) => setContextWindow(e.target.value)}
+              placeholder="e.g. 1000000"
+              className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium mb-1 block">Max Output (tokens)</label>
+            <input
+              type="number"
+              value={maxOutput}
+              onChange={(e) => setMaxOutput(e.target.value)}
+              placeholder="e.g. 128000"
+              className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            />
           </div>
         </div>
 
