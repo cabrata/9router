@@ -15,7 +15,10 @@ import {
   resolvePerchToken,
 } from "open-sse/executors/perchai.js";
 import perchaiOAuth from "@/lib/oauth/providers/perchai.js";
-import { OAUTH_PROVIDERS } from "@/shared/constants/providers.js";
+import { OAUTH_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers.js";
+import { AI_MODELS } from "@/shared/constants/models.js";
+import { resolveCaps } from "@/shared/hooks/useModelCaps.js";
+import { matchesSearch } from "@/shared/utils/modelSearchFilter.js";
 import { resolveProviderIconId } from "@/shared/utils/providerIcon.js";
 import { refreshAccessToken } from "open-sse/services/tokenRefresh/providers.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -382,5 +385,28 @@ describe("Perch AI Provider Integration", () => {
     expect(text).toContain('"arguments":"{\\"q\\":\\"test\\"}"');
     expect(text).toContain('"finish_reason":"tool_calls"');
     expect(text).toContain("data: [DONE]");
+  });
+
+  it("maps ALIAS_TO_ID and resolves caps via resolveCaps", () => {
+    expect(ALIAS_TO_ID["perch"]).toBe("perchai");
+
+    const caps = resolveCaps({}, {}, "perch/gpt-6.1-sol");
+    expect(caps).toBeDefined();
+    expect(typeof caps.reasoning).toBe("boolean");
+    expect(caps.contextWindow).toBeGreaterThan(0);
+  });
+
+  it("filters perch models via matchesSearch and populates AI_MODELS", () => {
+    const perchModels = AI_MODELS.filter((m) => m.provider === "perch");
+    expect(perchModels.length).toBeGreaterThanOrEqual(35);
+
+    const match1 = matchesSearch(perchModels[0], "perch");
+    expect(match1).toBe(true);
+
+    const gpt6Model = perchModels.find((m) => m.model === "gpt-6.1-sol");
+    expect(gpt6Model).toBeDefined();
+    expect(matchesSearch(gpt6Model, "sol")).toBe(true);
+    expect(matchesSearch(gpt6Model, "!claude")).toBe(true);
+    expect(matchesSearch(gpt6Model, "claude")).toBe(false);
   });
 });
