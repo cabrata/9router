@@ -24,6 +24,7 @@ import { refreshAccessToken } from "open-sse/services/tokenRefresh/providers.js"
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 
 const originalFetch = global.fetch;
 
@@ -408,5 +409,14 @@ describe("Perch AI Provider Integration", () => {
     expect(matchesSearch(gpt6Model, "sol")).toBe(true);
     expect(matchesSearch(gpt6Model, "!claude")).toBe(true);
     expect(matchesSearch(gpt6Model, "claude")).toBe(false);
+  });
+
+  it("resolves connection proxy for perchai connections", async () => {
+    const proxyConfig = await resolveConnectionProxyConfig({
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://127.0.0.1:8080",
+    });
+    expect(proxyConfig.connectionProxyEnabled).toBe(true);
+    expect(proxyConfig.connectionProxyUrl).toBe("http://127.0.0.1:8080");
   });
 });
