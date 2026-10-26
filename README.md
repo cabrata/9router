@@ -369,6 +369,10 @@ Default URLs:
         <img src="./public/providers/kimchi.png" width="60" alt="Kimchi"/><br/>
         <b>Kimchi</b>
       </td>
+      <td align="center" width="120">
+        <img src="./public/providers/perchai.png" width="60" alt="Perch AI"/><br/>
+        <b>Perch AI</b>
+      </td>
     </tr>
   </table>
 </div>
