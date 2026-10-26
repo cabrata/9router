@@ -26,6 +26,7 @@ import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
+import { normalizeProviderId } from "@/lib/providerNormalization.js";
 
 const originalFetch = global.fetch;
 
@@ -454,5 +455,11 @@ describe("Perch AI Provider Integration", () => {
     expect(body.request.messages[0].content[1].type).toBe("image_url");
     expect(body.request.messages[0].content[1].image_url.url).toBe("https://example.com/photo.jpg");
     expect(body.request.responseFormat).toEqual({ type: "json_object" });
+  });
+
+  it("normalizes provider name and slugs to perchai", () => {
+    expect(normalizeProviderId("Perch AI")).toBe("perchai");
+    expect(normalizeProviderId("perchai")).toBe("perchai");
+    expect(normalizeProviderId(" perchai ")).toBe("perchai");
   });
 });
