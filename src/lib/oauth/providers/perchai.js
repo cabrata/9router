@@ -58,7 +58,9 @@ const perchai = {
       },
       body: JSON.stringify({
         auth_code: authCode,
-        code_verifier: codeVerifier,
+        // Manual paste (callback URL from another device/session) may have no
+        // verifier; sending null lets Supabase treat it as a non-PKCE code.
+        ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
       }),
     });
 

@@ -207,6 +207,11 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   // repeated closes, and post-completion calls are all no-ops by construction.
   const stopOwnedProxy = useCallback(() => {
     const flow = flowRef.current;
+    // Proxy-session providers: the session lives server-side and must be
+    // registered before the OAuth provider redirects back to 127.0.0.1. Closing
+    // the modal therefore must NOT kill it — the user may retry in a new modal
+    // with the same callback URL, and a stale session is replaced on re-register.
+    if (PROXY_OAUTH_PROVIDERS.has(flow.proxyProvider)) return;
     if (flow.proxyStarted && !flow.stopSent && flow.proxyProvider) {
       flow.stopSent = true;
       fetch(`/api/oauth/${flow.proxyProvider}/stop-proxy`).catch(() => {});
@@ -214,7 +219,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   }, []);
 
   // Trae/Windsurf/Zed proxy OAuth flow: dynamic-port local callback → auto exchange.
-  const startProxyFlow = useCallback(async (providerId) => {
+  const startProxyFlow = useCallback(async (providerId, { skipPopup = false } = {}) => {
     // 1. Start the local callback server (returns a dynamic port + callback URL).
     const startRes = await fetch(`/api/oauth/${providerId}/start-proxy`);
     const startData = await startRes.json();
@@ -268,9 +273,15 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     if (!isOpenRef.current) return; // closed mid-flight: close effect owns cleanup now
     // 4. Open popup; proxy auto-exchanges on callback, modal polls poll-status.
     setAuthData({ ...authData, proxyProvider: providerId });
+    // Always expose the callback-URL input: a silently blocked popup (no
+    // throw, no window) must never leave the user without a way to finish.
     setStep("waiting");
+    if (skipPopup) return;
     popupRef.current = window.open(authData.authUrl, "oauth_popup", "width=600,height=700");
-    if (!popupRef.current) setStep("input"); // popup blocked → fall back to manual paste
+    // popup blocked → copy the URL so the user can open it themselves
+    if (!popupRef.current) {
+      try { await navigator.clipboard?.writeText(authData.authUrl); } catch {}
+    }
   }, [stopOwnedProxy]);
 
   // Start OAuth flow (plain function by design: it is only invoked from the
@@ -813,7 +824,17 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={() => { setAuthMode("browser"); setError(null); setStep("waiting"); startOAuthFlow(); }}
+                  onClick={async () => {
+                    if (authMode === "browser" && authData?.authUrl && authData?.proxyProvider) {
+                      setError(null);
+                      setStep("waiting");
+                      return;
+                    }
+                    setAuthMode("browser");
+                    setError(null);
+                    setStep("waiting");
+                    startOAuthFlow();
+                  }}
                   className={`flex-1 rounded-lg border px-3 py-2 text-sm transition-colors ${authMode === "browser" ? "border-primary bg-primary/10 text-primary" : "border-border text-text-muted hover:text-primary"}`}
                 >
                   🌐 Sign in with browser
@@ -833,18 +854,58 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
                 {step === "waiting" && (
                   <div className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg bg-sidebar/50">
                     <span className="material-symbols-outlined text-base text-primary animate-spin">progress_activity</span>
-                    <span className="text-sm">Waiting for browser authorization…</span>
+                    <span className="text-sm">
+                      Waiting for browser authorization…{" "}
+                      <button
+                        type="button"
+                        onClick={() => popupRef.current?.focus?.()}
+                        className="text-primary underline-offset-2 hover:underline"
+                      >
+                        Reopen login window
+                      </button>
+                    </span>
                   </div>
                 )}
-                {step === "input" && (
-                  <div className="space-y-3">
-                    <p className="text-sm text-text-muted">
-                      Popup was blocked. After authorizing in the browser, paste the full callback URL here:
+                {step === "waiting" && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-text-muted">
+                      Popup blocked or signed in on another device? Open the login URL manually, then paste the full
+                      callback URL (http://127.0.0.1:&lt;port&gt;/callback?code=...) below. Works for localhost and remote
+                      deployments.
                     </p>
+                    <Input
+                      value={authData?.authUrl || ""}
+                      readOnly
+                      className="font-mono text-xs"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={copied === "auth_url_proxy" ? "check" : "content_copy"}
+                        onClick={() => copy(authData?.authUrl, "auth_url_proxy")}
+                        disabled={!authData?.authUrl}
+                      >
+                        Copy login URL
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon="open_in_new"
+                        onClick={() => authData?.authUrl && window.open(authData.authUrl, "oauth_popup", "width=600,height=700")}
+                        disabled={!authData?.authUrl}
+                      >
+                        Open login
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {(step === "waiting" || step === "input") && (
+                  <div className="space-y-3">
                     <Input
                       value={callbackUrl}
                       onChange={(e) => setCallbackUrl(e.target.value)}
-                      placeholder="http://127.0.0.1:.../callback?..."
+                      placeholder="Paste callback URL: http://127.0.0.1:.../callback?code=..."
                       className="font-mono text-xs"
                     />
                     <div className="flex gap-2">

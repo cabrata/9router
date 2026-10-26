@@ -236,6 +236,30 @@ describe("Perch AI Provider Integration", () => {
     expect(body.code_verifier).toBe("test_verifier_123");
   });
 
+  it("exchanges a manually pasted callback URL without a session/verifier", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ access_token: "manual_jwt", expires_in: 3600 }),
+    });
+    global.fetch = fetchMock;
+
+    const res = await perchaiOAuth.exchangeToken(
+      {
+        tokenUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=pkce",
+        supabaseAnonKey: "anon_key_test",
+      },
+      "http://127.0.0.1:54321/callback?code=pasted_code_abc",
+      "http://127.0.0.1:54321/callback",
+      undefined,
+    );
+    expect(res.access_token).toBe("manual_jwt");
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.auth_code).toBe("pasted_code_abc");
+    // No verifier available: the field must be omitted, not sent as null.
+    expect(body).not.toHaveProperty("code_verifier");
+  });
+
   it("manages perchai proxy server lifecycle and session registry", async () => {
     const state = "test_proxy_state_" + Date.now();
     expect(registerPerchaiSession({ state, codeVerifier: "cv_1", redirectUri: "http://127.0.0.1:1234/callback" })).toBe(true);
