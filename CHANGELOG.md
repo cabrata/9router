@@ -1,3 +1,8 @@
+# v0.5.112 (2026-10-26)
+
+## Fixes
+- **Perch AI**: match CLI session refresh lifecycle, auto-renew turn tickets, format streaming tool calls in OpenAI shape, and handle 403 not_authorized with token rotation
+
 # v0.5.111 (2026-10-26)
 
 ## Features
