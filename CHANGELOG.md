@@ -2,6 +2,7 @@
 
 ## Fixes
 - **Perch AI**: match CLI session refresh lifecycle, auto-renew turn tickets, format streaming tool calls in OpenAI shape, and handle 403 not_authorized with token rotation
+- **Perch AI login**: show the callback URL field in the browser login flow (previously missing), with login URL copy/open actions, a reusable server-side session after the modal closes, and manual-paste PKCE exchange without a verifier
 
 # v0.5.111 (2026-10-26)
 
