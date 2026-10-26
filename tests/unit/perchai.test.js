@@ -479,7 +479,7 @@ describe("Perch AI Provider Integration", () => {
     );
     expect(testUtilsSrc).toContain("perchai:");
     expect(testUtilsSrc).toMatch(/perchai:\s*\{[\s\S]*?refreshable:\s*true/);
-    expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/public-model-default");
+    expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/cli-context");
   });
 
   it("calculates cost accurately for Perch AI models without NaN", () => {
@@ -604,5 +604,71 @@ describe("Perch AI Provider Integration", () => {
     expect(normalizeProviderId("Perch AI")).toBe("perchai");
     expect(normalizeProviderId("perchai")).toBe("perchai");
     expect(normalizeProviderId(" perchai ")).toBe("perchai");
+  });
+
+  it("retries on 403 not_authorized by refreshing session and updating turn-ticket", async () => {
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (url) => {
+      if (url.includes("token?grant_type=refresh_token")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: "refreshed_access_token",
+            refresh_token: "refreshed_refresh_token",
+            expires_in: 3600,
+          }),
+        };
+      }
+      if (url.includes("turn-ticket")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Type": "application/json" }),
+          json: async () => ({ ok: true, ticket: "ticket_v2", runId: "run_v2" }),
+        };
+      }
+      if (url.includes("model-call")) {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            ok: false,
+            status: 403,
+            clone: () => ({
+              text: async () => JSON.stringify({ ok: false, error: "Not authorized", errorCode: "not_authorized" }),
+            }),
+            text: async () => JSON.stringify({ ok: false, error: "Not authorized", errorCode: "not_authorized" }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Type": "application/json" }),
+          json: async () => ({
+            ok: true,
+            text: "Authorized and answered!",
+            toolCalls: [],
+          }),
+        };
+      }
+      return { ok: false, status: 404 };
+    });
+
+    const executor = new PerchAiExecutor();
+    const result = await executor.execute({
+      model: "perch/standard",
+      body: { messages: [{ role: "user", content: "hello" }] },
+      stream: false,
+      credentials: {
+        accessToken: "stale_token",
+        refreshToken: "valid_refresh",
+      },
+      fetchImpl: fetchMock,
+    });
+
+    expect(result.response.ok).toBe(true);
+    const json = await result.response.json();
+    expect(json.choices[0].message.content).toBe("Authorized and answered!");
+    expect(callCount).toBe(2);
   });
 });

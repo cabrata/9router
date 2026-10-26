@@ -59,12 +59,101 @@ const MODEL_OPTIONS = {
 
 const ROOST_TIERS = new Set(["standard", "pro", "starter", "standard_max", "pro_max"]);
 
+export const PERCH_SUPABASE_CONFIG = {
+  url: "https://zlfuvsfjtgsdtqcaykia.supabase.co",
+  anonKey: "sb_publishable_w4R_pNkUpygBFIljZCoOlA_67ACg0FO",
+  tokenUrl: "https://zlfuvsfjtgsdtqcaykia.supabase.co/auth/v1/token?grant_type=refresh_token",
+};
+
+export async function refreshPerchSession(session, fetchFn = globalThis.fetch) {
+  if (!session?.refreshToken) return null;
+  try {
+    const res = await fetchFn(PERCH_SUPABASE_CONFIG.tokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: PERCH_SUPABASE_CONFIG.anonKey,
+        Authorization: `Bearer ${PERCH_SUPABASE_CONFIG.anonKey}`,
+      },
+      body: JSON.stringify({ refresh_token: session.refreshToken }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.access_token) return null;
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || session.refreshToken,
+      expiresAt: data.expires_at || Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+      userId: data.user?.id || session.userId || null,
+      email: data.user?.email || session.email || null,
+      appUrl: session.appUrl || "https://app.perchai.app",
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function resolvePerchSession(credentials, fetchFn = globalThis.fetch) {
+  const explicit = credentials?.apiKey || credentials?.accessToken;
+  const refreshToken = credentials?.refreshToken || credentials?.providerSpecificData?.refreshToken;
+  const expiresAt = credentials?.expiresAt || credentials?.providerSpecificData?.expiresAt;
+  const appUrl = credentials?.providerSpecificData?.appUrl || credentials?.appUrl || "https://app.perchai.app";
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (explicit && typeof explicit === "string" && explicit.trim()) {
+    if (expiresAt && expiresAt <= nowSec + 90 && refreshToken) {
+      const refreshed = await refreshPerchSession({ refreshToken, appUrl }, fetchFn);
+      if (refreshed?.accessToken) {
+        credentials.accessToken = refreshed.accessToken;
+        credentials.apiKey = refreshed.accessToken;
+        credentials.refreshToken = refreshed.refreshToken;
+        credentials.expiresAt = refreshed.expiresAt;
+        return refreshed;
+      }
+    }
+    return {
+      accessToken: explicit.trim(),
+      refreshToken: refreshToken || null,
+      expiresAt: expiresAt || null,
+      appUrl,
+    };
+  }
+
+  // Fallback: check ~/.perch/cli-auth-session.json
+  try {
+    const authPath = path.join(os.homedir(), ".perch", "cli-auth-session.json");
+    if (fs.existsSync(authPath)) {
+      const parsed = JSON.parse(fs.readFileSync(authPath, "utf8"));
+      if (parsed?.accessToken && typeof parsed.accessToken === "string") {
+        if (parsed.expiresAt && parsed.expiresAt <= nowSec + 90 && parsed.refreshToken) {
+          const refreshed = await refreshPerchSession(parsed, fetchFn);
+          if (refreshed?.accessToken) {
+            const updated = {
+              ...parsed,
+              accessToken: refreshed.accessToken,
+              refreshToken: refreshed.refreshToken,
+              expiresAt: refreshed.expiresAt,
+              updatedAt: new Date().toISOString(),
+            };
+            try {
+              fs.writeFileSync(authPath, JSON.stringify(updated, null, 2));
+            } catch {}
+            return updated;
+          }
+        }
+        return parsed;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 export function resolvePerchToken(credentials) {
   const explicit = credentials?.apiKey || credentials?.accessToken;
   if (explicit && typeof explicit === "string" && explicit.trim()) {
     return explicit.trim();
   }
-  // Fallback: check ~/.perch/cli-auth-session.json
   try {
     const authPath = path.join(os.homedir(), ".perch", "cli-auth-session.json");
     if (fs.existsSync(authPath)) {
@@ -73,9 +162,7 @@ export function resolvePerchToken(credentials) {
         return parsed.accessToken.trim();
       }
     }
-  } catch {
-    // ignore filesystem read error
-  }
+  } catch {}
   return null;
 }
 
@@ -131,6 +218,7 @@ export function buildPerchRequestBody(model, body, extra = {}) {
   const optionId = MODEL_OPTIONS[cleanModel] || null;
 
   const runId = extra?.runId || `cli-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const hasTicket = extra?.hasTicket !== false;
 
   return {
     request: {
@@ -145,12 +233,16 @@ export function buildPerchRequestBody(model, body, extra = {}) {
     runId,
     lane: "chat",
     strictManual: false,
-    clientSurface: "cli",
+    ...(hasTicket ? { clientSurface: "cli" } : {}),
     preferredModelId: isTier ? null : cleanModel,
     avoidModelIds: [],
     attribution: null,
     ...(isTier
-      ? { roostModelChoice: cleanModel }
+      ? {
+          roostModelChoice: cleanModel,
+          roostReasoning: true,
+          effort: { level: "high", orchestration: false },
+        }
       : {
           manualModelOptionId: optionId || cleanModel,
         }),
@@ -164,23 +256,50 @@ export function wrapPerchCompletionStream(response, model) {
   const encoder = new TextEncoder();
   let buffer = "";
   let done = false;
+  let firstChunkSent = false;
   const chunkId = `chatcmpl-perch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const created = Math.floor(Date.now() / 1000);
 
-  const makeChunk = (delta, finishReason = null, usage = null) => ({
-    id: chunkId,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        delta,
-        finish_reason: finishReason,
-      },
-    ],
-    ...(usage ? { usage } : {}),
-  });
+  const formatToolCalls = (toolCalls) => {
+    if (!Array.isArray(toolCalls)) return [];
+    return toolCalls.map((tc, idx) => {
+      const fn = tc.function || {};
+      const name = tc.name || fn.name || "";
+      const rawArgs = tc.arguments !== undefined ? tc.arguments : fn.arguments;
+      const argumentsStr = typeof rawArgs === "string" ? rawArgs : (rawArgs ? JSON.stringify(rawArgs) : "");
+      return {
+        index: idx,
+        id: tc.id || `call_${idx}`,
+        type: "function",
+        function: {
+          name,
+          arguments: argumentsStr,
+        },
+      };
+    });
+  };
+
+  const makeChunk = (delta, finishReason = null, usage = null) => {
+    const chunkDelta = { ...delta };
+    if (!firstChunkSent) {
+      firstChunkSent = true;
+      chunkDelta.role = "assistant";
+    }
+    return {
+      id: chunkId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: chunkDelta,
+          finish_reason: finishReason,
+        },
+      ],
+      ...(usage ? { usage } : {}),
+    };
+  };
 
   const finish = (controller) => {
     if (done) return;
@@ -213,16 +332,24 @@ export function wrapPerchCompletionStream(response, model) {
       const chunk = makeChunk({ reasoning_content: payload.text });
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
     } else if ((payload.type === "tool_call_delta" || payload.type === "tool_use_end") && Array.isArray(payload.toolCalls)) {
-      const chunk = makeChunk({ tool_calls: payload.toolCalls });
+      const formatted = formatToolCalls(payload.toolCalls);
+      const chunk = makeChunk({ tool_calls: formatted });
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    } else if (payload.type === "error") {
+      const errorMsg = payload.message || payload.error || "Stream error";
+      const errChunk = makeChunk({ content: `[Perch AI Error: ${errorMsg}]` }, "stop");
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(errChunk)}\n\n`));
+      finish(controller);
     } else if (payload.type === "done") {
       if (payload.ok === false) {
         const errorMsg = payload.error || "Perch AI model call failed";
         const errChunk = makeChunk({ content: `[Perch AI Error: ${errorMsg}]` }, "stop");
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(errChunk)}\n\n`));
       } else {
-        const finishReason = payload.toolCalls?.length ? "tool_calls" : "stop";
-        const chunk = makeChunk({}, finishReason, payload.usage || null);
+        const hasTools = Array.isArray(payload.toolCalls) && payload.toolCalls.length > 0;
+        const finishReason = hasTools ? "tool_calls" : "stop";
+        const delta = hasTools ? { tool_calls: formatToolCalls(payload.toolCalls) } : {};
+        const chunk = makeChunk(delta, finishReason, payload.usage || null);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
       }
       finish(controller);
@@ -282,7 +409,15 @@ export async function wrapPerchNonStreaming(response, model) {
 
   const chunkId = `chatcmpl-perch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const created = Math.floor(Date.now() / 1000);
-  const toolCalls = json.toolCalls || [];
+  const rawTools = Array.isArray(json.toolCalls) ? json.toolCalls : [];
+  const toolCalls = rawTools.map((tc, idx) => ({
+    id: tc.id || `call_${idx}`,
+    type: "function",
+    function: {
+      name: tc.name || tc.function?.name || "",
+      arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments || {}),
+    },
+  }));
   const finishReason = toolCalls.length ? "tool_calls" : "stop";
 
   const completion = {
@@ -320,20 +455,36 @@ export class PerchAiExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, fetchImpl = null }) {
-    const token = resolvePerchToken(credentials);
+    const fetchFn = typeof fetchImpl === "function" ? fetchImpl : proxyAwareFetch;
+    let session = await resolvePerchSession(credentials, fetchFn);
+    let token = session?.accessToken;
+
     if (!token) {
       throw new Error(
-        "Perch AI requires authentication. Please sign in via OAuth or provide an Access Token from `perch login` (~/.perch/cli-auth-session.json)."
+        "Perch AI requires authentication. Please sign in via OAuth or run `perch login` in terminal."
       );
     }
 
-    const appUrl = credentials?.providerSpecificData?.appUrl || credentials?.appUrl || "https://app.perchai.app";
-    const fetchFn = typeof fetchImpl === "function" ? fetchImpl : proxyAwareFetch;
+    const appUrl = credentials?.providerSpecificData?.appUrl || credentials?.appUrl || session?.appUrl || "https://app.perchai.app";
 
-    // Acquire or reuse Perch turn-ticket to satisfy perch_surface_required check
-    const ticketData = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+    // Acquire or reuse Perch turn-ticket (matches CLI turn ticket minting)
+    let ticketData = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
 
-    const payload = buildPerchRequestBody(model, body, { runId: ticketData?.runId });
+    // If turn-ticket failed with 401 and we have a refresh_token, refresh session and retry ticket
+    if (!ticketData?.ticket && session?.refreshToken) {
+      const refreshed = await refreshPerchSession(session, fetchFn);
+      if (refreshed?.accessToken) {
+        session = refreshed;
+        token = refreshed.accessToken;
+        ticketData = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+      }
+    }
+
+    const payload = buildPerchRequestBody(model, body, {
+      runId: ticketData?.runId,
+      hasTicket: !!ticketData?.ticket,
+    });
+
     const url = `${appUrl.replace(/\/+$/, "")}/api/perch-terminal/model-call`;
     const headers = {
       "Content-Type": "application/json",
@@ -353,17 +504,28 @@ export class PerchAiExecutor extends BaseExecutor {
 
     let response = await fetchFn(url, fetchOptions, proxyOptions);
 
-    // If 403 perch_surface_required or 401 occurs, retry once with a fresh turn-ticket
-    if (response.status === 403 || response.status === 401) {
+    // If 401 or 403 not_authorized occurs, attempt token refresh and single retry (matches CLI YLr/r6r)
+    if (response.status === 401 || response.status === 403) {
       try {
         const cloned = response.clone();
         const errText = await cloned.text().catch(() => "");
-        if (errText.includes("perch_surface_required") || response.status === 401) {
+        const shouldRefresh = response.status === 401 || errText.includes("not_authorized") || errText.includes("perch_surface_required");
+        if (shouldRefresh && session?.refreshToken) {
           perchTicketCache.delete(token);
-          const retryTicket = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
-          if (retryTicket?.ticket) {
-            headers["x-perch-turn-ticket"] = retryTicket.ticket;
-            payload.runId = retryTicket.runId || payload.runId;
+          const refreshed = await refreshPerchSession(session, fetchFn);
+          if (refreshed?.accessToken) {
+            session = refreshed;
+            token = refreshed.accessToken;
+            headers.Authorization = `Bearer ${token}`;
+            const retryTicket = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+            if (retryTicket?.ticket) {
+              headers["x-perch-turn-ticket"] = retryTicket.ticket;
+              payload.runId = retryTicket.runId || payload.runId;
+              payload.clientSurface = "cli";
+            } else {
+              delete headers["x-perch-turn-ticket"];
+              delete payload.clientSurface;
+            }
             fetchOptions.headers = headers;
             fetchOptions.body = JSON.stringify(payload);
             response = await fetchFn(url, fetchOptions, proxyOptions);

@@ -172,15 +172,17 @@ const OAUTH_TEST_CONFIG = {
     useApiKey: true,
   },
   perchai: {
-    url: "https://app.perchai.app/api/perch-terminal/public-model-default",
-    method: "GET",
+    url: "https://app.perchai.app/api/perch-terminal/cli-context",
+    method: "POST",
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     extraHeaders: {
       Accept: "application/json",
+      "Content-Type": "application/json",
       "User-Agent": "perchai-cli/2.4.118",
       "x-perch-locale": "en",
     },
+    body: JSON.stringify({ query: "", includeIndex: false }),
     refreshable: true,
   },
 };
