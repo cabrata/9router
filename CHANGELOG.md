@@ -6,6 +6,7 @@
 - **Perch AI**: surface `perch_surface_required` as a readable error instead of a silent dead stream, stop retrying surface gates after a token refresh, keep the real upstream error when a retry is worse, and stop reading the 403 body twice
 - **Perch AI plan**: check and select the plan through Perch's own `cli-plan` endpoint (the previous probe posted an empty `messages: []` and always got 400 "Missing messages.", so the gate was never detected); drop the non-existent `/plan`, `/roost-plan` and `/cli-context` selection paths, require `noticeVersion`, and only offer Starter (Pro is a link)
 - **Perch AI test**: the connection test posts to `cli-plan` and reports the account's real plan state instead of a bare 200; treat only 403 `tier_selection_required` as the plan gate (429/402 usage limits no longer masquerade as one)
+- **Docker image**: ship `src/lib/oauth/kiroExternalIdp.js`, which `open-sse/services/tokenRefresh/providers.js` imports by path; Next tracing only put it in the bundle, so the image could not import that module (Perch AI token refresh failed with `ERR_MODULE_NOT_FOUND`)
 - **Perch AI login**: show the callback URL field in the browser login flow (previously missing), with login URL copy/open actions, a reusable server-side session after the modal closes, and manual-paste PKCE exchange without a verifier
 
 # v0.5.111 (2026-10-26)

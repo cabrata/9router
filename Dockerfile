@@ -56,6 +56,10 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/custom-server.js ./custom-server.js
 COPY --from=builder /app/open-sse ./open-sse
+# open-sse/services/tokenRefresh/providers.js imports this app helper, but Next
+# file tracing only copies it into the bundle, not next to open-sse. Without it the
+# image cannot import providers.js at all, which breaks Perch AI token refresh.
+COPY --from=builder /app/src/lib/oauth/kiroExternalIdp.js ./src/lib/oauth/kiroExternalIdp.js
 # Next file tracing can omit sibling files; MITM runs server.js as a separate process.
 COPY --from=builder /app/src/mitm ./src/mitm
 # Standalone node_modules may omit deps only required by the MITM child process.

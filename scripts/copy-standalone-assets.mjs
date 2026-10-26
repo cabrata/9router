@@ -37,6 +37,20 @@ export function copyStandaloneAssets({ projectRoot = process.cwd(), distDir = pr
     cpSync(serverWrapperSource, serverWrapperDestination, { force: true });
     console.log(`[standalone-assets] Copied custom-server.js to ${serverWrapperDestination}`);
   }
+
+  // `open-sse` is shipped as source next to the server, and some of its modules
+  // import app helpers by relative path -- e.g. tokenRefresh/providers.js imports
+  // src/lib/oauth/kiroExternalIdp.js. Next traces those into the bundle only, so
+  // without this copy the standalone runtime cannot import that module at all
+  // (Perch AI token refresh then fails with ERR_MODULE_NOT_FOUND).
+  const openSseRuntimeFiles = ["src/lib/oauth/kiroExternalIdp.js"];
+  for (const relativePath of openSseRuntimeFiles) {
+    const source = resolve(projectRoot, relativePath);
+    if (!existsSync(source)) continue;
+    const destination = resolve(standaloneDir, relativePath);
+    cpSync(source, destination, { force: true });
+    console.log(`[standalone-assets] Copied ${relativePath} to your standalone build`);
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(dirname(fileURLToPath(import.meta.url)), "copy-standalone-assets.mjs")) {
