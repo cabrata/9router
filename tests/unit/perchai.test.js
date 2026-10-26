@@ -166,9 +166,10 @@ describe("Perch AI Provider Integration", () => {
       expect(call.function.arguments.trim()).not.toBe("");
       expect(() => JSON.parse(call.function.arguments)).not.toThrow();
     }
-    // The repeated list does not re-announce call 0 on every delta.
-    expect(calls.map((c) => c.index)).toEqual([0, 1, 0, 1]);
-    expect(calls.filter((c) => c.index === 0)).toHaveLength(2);
+    // The repeated list does not re-announce calls: exactly one chunk per call,
+    // so client accumulators do not double the JSON string.
+    expect(calls.map((c) => c.index)).toEqual([0, 1]);
+    expect(calls.filter((c) => c.index === 0)).toHaveLength(1);
   });
 
   it("normalizes non-streaming tool-call arguments", async () => {

@@ -587,9 +587,16 @@ export function wrapPerchCompletionStream(response, model) {
         const errChunk = makeChunk({ content: `[Perch AI Error: ${errorMsg}]` }, "stop");
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(errChunk)}\n\n`));
       } else {
-        const hasTools = Array.isArray(payload.toolCalls) && payload.toolCalls.length > 0;
+        const hasTools = (Array.isArray(payload.toolCalls) && payload.toolCalls.length > 0) || announcedToolCalls > 0;
         const finishReason = hasTools ? "tool_calls" : "stop";
-        const delta = hasTools ? { tool_calls: formatToolCalls(payload.toolCalls) } : {};
+        // OpenAI streaming spec: client accumulators concatenate `arguments` across
+        // chunks for the same index. If we sent tool_calls during earlier deltas,
+        // re-sending them in the `done` chunk doubles the JSON string (e.g. `{}{}`
+        // or `{cmd}{cmd}`), which fails JSON.parse and makes clients report:
+        // "arguments must be a JSON object, got null".
+        // Only emit newly unannounced calls; if all were announced, delta is {}.
+        const freshCalls = Array.isArray(payload.toolCalls) ? formatNewToolCalls(payload.toolCalls) : [];
+        const delta = freshCalls.length > 0 ? { tool_calls: freshCalls } : {};
         const chunk = makeChunk(delta, finishReason, payload.usage || null);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
       }
