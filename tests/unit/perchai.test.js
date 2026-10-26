@@ -22,6 +22,7 @@ import { matchesSearch } from "@/shared/utils/modelSearchFilter.js";
 import { resolveProviderIconId } from "@/shared/utils/providerIcon.js";
 import { refreshAccessToken } from "open-sse/services/tokenRefresh/providers.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
@@ -418,5 +419,12 @@ describe("Perch AI Provider Integration", () => {
     });
     expect(proxyConfig.connectionProxyEnabled).toBe(true);
     expect(proxyConfig.connectionProxyUrl).toBe("http://127.0.0.1:8080");
+  });
+
+  it("resolves thinking levels for Perch AI reasoning models", () => {
+    const deepseekLevels = getThinkingLevels("perch", "deepseek-v4.1-flash");
+    expect(deepseekLevels).toBeDefined();
+    expect(deepseekLevels.length).toBeGreaterThan(0);
+    expect(deepseekLevels).toContain("high");
   });
 });
