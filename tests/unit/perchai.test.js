@@ -435,4 +435,24 @@ describe("Perch AI Provider Integration", () => {
     expect(entry.hasOAuth).toBe(true);
     expect(entry.authModes).toEqual(["oauth", "apikey"]);
   });
+
+  it("preserves multimodal image parts and response_format in buildPerchRequestBody", () => {
+    const multimodalMsg = {
+      role: "user",
+      content: [
+        { type: "text", text: "Describe this image" },
+        { type: "image_url", image_url: { url: "https://example.com/photo.jpg" } },
+      ],
+    };
+
+    const body = buildPerchRequestBody("gpt-6.1-sol", {
+      messages: [multimodalMsg],
+      response_format: { type: "json_object" },
+    });
+
+    expect(body.request.messages[0].content).toHaveLength(2);
+    expect(body.request.messages[0].content[1].type).toBe("image_url");
+    expect(body.request.messages[0].content[1].image_url.url).toBe("https://example.com/photo.jpg");
+    expect(body.request.responseFormat).toEqual({ type: "json_object" });
+  });
 });
