@@ -19,6 +19,7 @@ import { OAUTH_PROVIDERS } from "@/shared/constants/providers.js";
 import { resolveProviderIconId } from "@/shared/utils/providerIcon.js";
 import { refreshAccessToken } from "open-sse/services/tokenRefresh/providers.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
 
 const originalFetch = global.fetch;
@@ -330,5 +331,56 @@ describe("Perch AI Provider Integration", () => {
     expect(testUtilsSrc).toContain("perchai:");
     expect(testUtilsSrc).toMatch(/perchai:\s*\{[\s\S]*?refreshable:\s*true/);
     expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/public-model-default");
+  });
+
+  it("calculates cost accurately for Perch AI models without NaN", () => {
+    const pricingGpt6 = getPricingForModel("perch", "gpt-6.1-sol");
+    expect(pricingGpt6).toBeDefined();
+    expect(typeof pricingGpt6.input).toBe("number");
+    expect(typeof pricingGpt6.output).toBe("number");
+
+    const cost = calculateCostFromTokens(
+      { prompt_tokens: 1000, completion_tokens: 500 },
+      pricingGpt6
+    );
+    expect(typeof cost).toBe("number");
+    expect(Number.isNaN(cost)).toBe(false);
+    expect(cost).toBeGreaterThan(0);
+
+    const pricingDeepseek = getPricingForModel("perch", "deepseek-v4.1-flash");
+    expect(pricingDeepseek).toBeDefined();
+    const deepseekCost = calculateCostFromTokens(
+      { prompt_tokens: 2000, completion_tokens: 1000 },
+      pricingDeepseek
+    );
+    expect(deepseekCost).toBeGreaterThan(0);
+  });
+
+  it("translates streaming tool call deltas and tool_use_end events accurately", async () => {
+    const toolCallStream = [
+      'data: {"type":"tool_call_delta","toolCalls":[{"id":"call_abc","type":"function","function":{"name":"search","arguments":"{\\"q\\":\\"test\\"}"}}]}',
+      'data: {"type":"tool_use_end","toolCalls":[{"id":"call_abc","type":"function","function":{"name":"search","arguments":"{\\"q\\":\\"test\\"}"}}]}',
+      'data: {"type":"done","ok":true,"text":"","toolCalls":[{"id":"call_abc","type":"function","function":{"name":"search","arguments":"{\\"q\\":\\"test\\"}"}}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}',
+    ].join("\n\n") + "\n\n";
+
+    const response = new Response(toolCallStream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    const stream = wrapPerchCompletionStream(response, "pro");
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+
+    expect(text).toContain('"name":"search"');
+    expect(text).toContain('"arguments":"{\\"q\\":\\"test\\"}"');
+    expect(text).toContain('"finish_reason":"tool_calls"');
+    expect(text).toContain("data: [DONE]");
   });
 });
