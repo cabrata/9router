@@ -267,7 +267,7 @@ export class PerchAiExecutor extends BaseExecutor {
     super(provider);
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, fetchImpl = null }) {
     const token = resolvePerchToken(credentials);
     if (!token) {
       throw new Error(
@@ -291,7 +291,8 @@ export class PerchAiExecutor extends BaseExecutor {
       signal,
     };
 
-    const response = await proxyAwareFetch(url, fetchOptions, proxyOptions);
+    const fetchFn = typeof fetchImpl === "function" ? fetchImpl : proxyAwareFetch;
+    const response = await fetchFn(url, fetchOptions, proxyOptions);
 
     let wrappedResponse;
     if (stream) {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import REGISTRY from "open-sse/providers/registry/index.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { PROVIDER_MODELS, getDefaultModel, isValidModel } from "open-sse/config/providerModels.js";
@@ -12,8 +12,21 @@ import {
 import perchaiOAuth from "@/lib/oauth/providers/perchai.js";
 import { OAUTH_PROVIDERS } from "@/shared/constants/providers.js";
 import { resolveProviderIconId } from "@/shared/utils/providerIcon.js";
+import { refreshAccessToken } from "open-sse/services/tokenRefresh/providers.js";
+import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { CLI_TOOLS } from "@/shared/constants/cliTools.js";
+
+const originalFetch = global.fetch;
 
 describe("Perch AI Provider Integration", () => {
+  beforeEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
   it("registers perchai in REGISTRY with models and metadata", () => {
     const perch = REGISTRY.find((r) => r.id === "perchai");
     expect(perch).toBeDefined();
@@ -133,9 +146,101 @@ describe("Perch AI Provider Integration", () => {
       expires_in: 3600,
       user: { id: "uid_1", email: "user@perchai.app" },
     });
-    expect(mapped.accessToken).toBe("jwt_token_123");
-    expect(mapped.refreshToken).toBe("refresh_token_456");
-    expect(mapped.email).toBe("user@perchai.app");
-    expect(mapped.providerSpecificData.userId).toBe("uid_1");
+    expect(mapped.accessToken, "jwt_token_123");
+    expect(mapped.refreshToken, "refresh_token_456");
+    expect(mapped.email, "user@perchai.app");
+    expect(mapped.providerSpecificData.userId, "uid_1");
+  });
+
+  it("refreshes token via Supabase OAuth refresh profile", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          access_token: "new_perch_access_token",
+          refresh_token: "new_perch_refresh_token",
+          expires_in: 3600,
+        }),
+    });
+    global.fetch = fetchMock;
+
+    const res = await refreshAccessToken("perchai", "old_refresh_token", {}, console);
+    expect(res).not.toBeNull();
+    expect(res.accessToken).toBe("new_perch_access_token");
+    expect(res.refreshToken).toBe("new_perch_refresh_token");
+    expect(res.expiresIn).toBe(3600);
+
+    const [callUrl, callInit] = fetchMock.mock.calls[0];
+    expect(callUrl).toContain("grant_type=refresh_token");
+    expect(callInit.headers["apikey"]).toBe("sb_publishable_w4R_pNkUpygBFIljZCoOlA_67ACg0FO");
+    expect(callInit.headers["Content-Type"]).toBe("application/json");
+    const parsedBody = JSON.parse(callInit.body);
+    expect(parsedBody.refresh_token).toBe("old_refresh_token");
+    expect(parsedBody.grant_type).toBe("refresh_token");
+  });
+
+  it("resolves capabilities for Perch AI models", () => {
+    const standardCaps = getCapabilitiesForModel("perch", "standard");
+    expect(standardCaps.tools).toBe(true);
+    expect(standardCaps.contextWindow).toBeGreaterThan(0);
+
+    const gpt6Caps = getCapabilitiesForModel("perch", "gpt-6.1-sol");
+    expect(gpt6Caps.tools).toBe(true);
+
+    const claudeCaps = getCapabilitiesForModel("perch", "claude-opus-5.5");
+    expect(claudeCaps.tools).toBe(true);
+  });
+
+  it("configures perch in CLI_TOOLS", () => {
+    const perchTool = CLI_TOOLS.perch;
+    expect(perchTool).toBeDefined();
+    expect(perchTool.id).toBe("perch");
+    expect(perchTool.name).toBe("Perch CLI");
+    expect(perchTool.color).toBe("#22C55E");
+    expect(perchTool.defaultModels.length).toBeGreaterThan(0);
+  });
+
+  it("executes PerchAiExecutor end-to-end with simulated upstream fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      json: () =>
+        Promise.resolve({
+          ok: true,
+          text: "Hello from Perch AI!",
+          toolCalls: [],
+          usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 },
+        }),
+    });
+    global.fetch = fetchMock;
+
+    const executor = new PerchAiExecutor();
+    const result = await executor.execute({
+      model: "perch/gpt-6.1-sol",
+      body: {
+        messages: [{ role: "user", content: "Hi" }],
+      },
+      stream: false,
+      credentials: { apiKey: "test-perch-jwt" },
+      signal: new AbortController().signal,
+      fetchImpl: fetchMock,
+    });
+
+    expect(result.url).toBe("https://app.perchai.app/api/perch-terminal/model-call");
+    expect(fetchMock).toHaveBeenCalled();
+    const [callUrl, callInit] = fetchMock.mock.calls[0];
+    expect(callUrl).toBe("https://app.perchai.app/api/perch-terminal/model-call");
+    expect(callInit.headers["Authorization"]).toBe("Bearer test-perch-jwt");
+    expect(callInit.headers["User-Agent"]).toContain("Perch-CLI");
+
+    const payload = JSON.parse(callInit.body);
+    expect(payload.preferredModelId).toBe("gpt-6.1-sol");
+    expect(payload.manualModelOptionId).toBe("azure-foundry-gpt-6-1-sol");
+    expect(payload.request.messages[0].content).toBe("Hi");
+
+    const json = await result.response.json();
+    expect(json.choices[0].message.content).toBe("Hello from Perch AI!");
   });
 });
