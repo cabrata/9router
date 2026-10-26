@@ -79,10 +79,58 @@ export function resolvePerchToken(credentials) {
   return null;
 }
 
-export function buildPerchRequestBody(model, body) {
+// ponytail: cache turn ticket per token; renews before 5-minute expiry.
+export const perchTicketCache = new Map();
+
+export async function getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions = null) {
+  if (!token) return null;
+  const cached = perchTicketCache.get(token);
+  if (cached && cached.expiresAt > Date.now() + 30_000) {
+    return cached;
+  }
+
+  try {
+    const url = `${(appUrl || "https://app.perchai.app").replace(/\/+$/, "")}/api/perch-terminal/turn-ticket`;
+    const res = await fetchFn(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "perchai-cli/2.4.118",
+          "x-perch-locale": "en",
+        },
+        body: JSON.stringify({ surface: "cli", profile: "standard" }),
+      },
+      proxyOptions
+    );
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data?.ok && (data.ticket || data.token)) {
+      const ticketStr = data.ticket || data.token;
+      const expiresAt = data.expiresAt ? Date.parse(data.expiresAt) : Date.now() + 300_000;
+      const entry = {
+        ticket: ticketStr,
+        runId: data.runId || null,
+        expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 300_000,
+      };
+      perchTicketCache.set(token, entry);
+      return entry;
+    }
+  } catch {
+    // If ticket endpoint fails, proceed gracefully
+  }
+  return null;
+}
+
+export function buildPerchRequestBody(model, body, extra = {}) {
   const cleanModel = typeof model === "string" ? model.replace(/^perch(ai)?\//i, "").trim().toLowerCase() : "standard";
   const isTier = ROOST_TIERS.has(cleanModel);
   const optionId = MODEL_OPTIONS[cleanModel] || null;
+
+  const runId = extra?.runId || `cli-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   return {
     request: {
@@ -94,12 +142,16 @@ export function buildPerchRequestBody(model, body) {
       ...(body?.tool_choice ? { toolChoice: body.tool_choice } : {}),
       ...(body?.response_format ? { responseFormat: body.response_format } : {}),
     },
+    runId,
     lane: "chat",
+    strictManual: false,
     clientSurface: "cli",
+    preferredModelId: isTier ? null : cleanModel,
+    avoidModelIds: [],
+    attribution: null,
     ...(isTier
       ? { roostModelChoice: cleanModel }
       : {
-          preferredModelId: cleanModel,
           manualModelOptionId: optionId || cleanModel,
         }),
   };
@@ -275,13 +327,21 @@ export class PerchAiExecutor extends BaseExecutor {
       );
     }
 
-    const payload = buildPerchRequestBody(model, body);
-    const url = "https://app.perchai.app/api/perch-terminal/model-call";
+    const appUrl = credentials?.providerSpecificData?.appUrl || credentials?.appUrl || "https://app.perchai.app";
+    const fetchFn = typeof fetchImpl === "function" ? fetchImpl : proxyAwareFetch;
+
+    // Acquire or reuse Perch turn-ticket to satisfy perch_surface_required check
+    const ticketData = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+
+    const payload = buildPerchRequestBody(model, body, { runId: ticketData?.runId });
+    const url = `${appUrl.replace(/\/+$/, "")}/api/perch-terminal/model-call`;
     const headers = {
       "Content-Type": "application/json",
-      "User-Agent": "Perch-CLI/2.4.118",
+      "User-Agent": "perchai-cli/2.4.118",
+      "x-perch-locale": "en",
       Authorization: `Bearer ${token}`,
       ...(stream ? { Accept: "text/event-stream" } : {}),
+      ...(ticketData?.ticket ? { "x-perch-turn-ticket": ticketData.ticket } : {}),
     };
 
     const fetchOptions = {
@@ -291,8 +351,26 @@ export class PerchAiExecutor extends BaseExecutor {
       signal,
     };
 
-    const fetchFn = typeof fetchImpl === "function" ? fetchImpl : proxyAwareFetch;
-    const response = await fetchFn(url, fetchOptions, proxyOptions);
+    let response = await fetchFn(url, fetchOptions, proxyOptions);
+
+    // If 403 perch_surface_required or 401 occurs, retry once with a fresh turn-ticket
+    if (response.status === 403 || response.status === 401) {
+      try {
+        const cloned = response.clone();
+        const errText = await cloned.text().catch(() => "");
+        if (errText.includes("perch_surface_required") || response.status === 401) {
+          perchTicketCache.delete(token);
+          const retryTicket = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+          if (retryTicket?.ticket) {
+            headers["x-perch-turn-ticket"] = retryTicket.ticket;
+            payload.runId = retryTicket.runId || payload.runId;
+            fetchOptions.headers = headers;
+            fetchOptions.body = JSON.stringify(payload);
+            response = await fetchFn(url, fetchOptions, proxyOptions);
+          }
+        }
+      } catch {}
+    }
 
     let wrappedResponse;
     if (stream) {

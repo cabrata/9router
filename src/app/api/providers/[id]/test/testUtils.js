@@ -178,7 +178,8 @@ const OAUTH_TEST_CONFIG = {
     authPrefix: "Bearer ",
     extraHeaders: {
       Accept: "application/json",
-      "User-Agent": "Perch-CLI/2.4.118",
+      "User-Agent": "perchai-cli/2.4.118",
+      "x-perch-locale": "en",
     },
     refreshable: true,
   },

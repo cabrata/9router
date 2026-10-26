@@ -343,17 +343,27 @@ describe("Perch AI Provider Integration", () => {
   });
 
   it("executes PerchAiExecutor end-to-end with simulated upstream fetch", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      headers: new Headers({ "Content-Type": "application/json" }),
-      json: () =>
-        Promise.resolve({
+    const fetchMock = vi.fn().mockImplementation(async (url) => {
+      if (url.includes("turn-ticket")) {
+        return {
           ok: true,
-          text: "Hello from Perch AI!",
-          toolCalls: [],
-          usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 },
-        }),
+          status: 200,
+          headers: new Headers({ "Content-Type": "application/json" }),
+          json: () => Promise.resolve({ ok: true, ticket: "test-ticket", runId: "test-run" }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "Content-Type": "application/json" }),
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            text: "Hello from Perch AI!",
+            toolCalls: [],
+            usage: { prompt_tokens: 8, completion_tokens: 5, total_tokens: 13 },
+          }),
+      };
     });
     global.fetch = fetchMock;
 
@@ -371,14 +381,18 @@ describe("Perch AI Provider Integration", () => {
 
     expect(result.url).toBe("https://app.perchai.app/api/perch-terminal/model-call");
     expect(fetchMock).toHaveBeenCalled();
-    const [callUrl, callInit] = fetchMock.mock.calls[0];
+    const modelCall = fetchMock.mock.calls.find(([u]) => u.includes("model-call"));
+    expect(modelCall).toBeDefined();
+    const [callUrl, callInit] = modelCall;
     expect(callUrl).toBe("https://app.perchai.app/api/perch-terminal/model-call");
     expect(callInit.headers["Authorization"]).toBe("Bearer test-perch-jwt");
-    expect(callInit.headers["User-Agent"]).toContain("Perch-CLI");
+    expect(callInit.headers["User-Agent"]).toContain("perchai-cli");
+    expect(callInit.headers["x-perch-turn-ticket"]).toBe("test-ticket");
 
     const payload = JSON.parse(callInit.body);
     expect(payload.preferredModelId).toBe("gpt-6.1-sol");
     expect(payload.manualModelOptionId).toBe("azure-foundry-gpt-6-1-sol");
+    expect(payload.clientSurface).toBe("cli");
     expect(payload.request.messages[0].content).toBe("Hi");
 
     const json = await result.response.json();

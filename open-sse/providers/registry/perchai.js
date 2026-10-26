@@ -19,7 +19,8 @@ export default {
   transport: {
     baseUrl: "https://app.perchai.app/api/perch-terminal/model-call",
     headers: {
-      "User-Agent": "Perch-CLI/2.4.118",
+      "User-Agent": "perchai-cli/2.4.118",
+      "x-perch-locale": "en",
     },
     timeoutMs: 180000,
     stallTimeoutMs: 120000,
