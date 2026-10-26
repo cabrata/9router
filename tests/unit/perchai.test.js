@@ -133,6 +133,57 @@ describe("Perch AI Provider Integration", () => {
     expect(tier.request.messages[0].content).toBe(short);
   });
 
+  it("never emits empty tool-call arguments and keeps stable indexes", async () => {
+    // Perch can emit a tool call whose arguments are missing/null; forwarding that
+    // as "" made clients fail with "arguments must be a JSON object, got null".
+    const stream = [
+      'data: {"type":"tool_call_delta","toolCalls":[{"id":"a1","name":"sensors","arguments":null}]}',
+      'data: {"type":"tool_call_delta","toolCalls":[{"id":"a1","name":"sensors","arguments":null},{"id":"a2","name":"bash","arguments":{"command":"ls"}}]}',
+      'data: {"type":"done","ok":true,"toolCalls":[{"id":"a1","name":"sensors","arguments":""},{"id":"a2","name":"bash","arguments":{"command":"ls"}}]}',
+    ].join("\n\n") + "\n\n";
+
+    const reader = wrapPerchCompletionStream(
+      new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+      "qwen-3.8-max"
+    ).body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+
+    const chunks = text
+      .split("\n\n")
+      .filter((line) => line.startsWith("data: {") && line.includes("tool_calls"))
+      .map((line) => JSON.parse(line.slice(6)));
+    const calls = chunks.flatMap((chunk) => chunk.choices[0].delta.tool_calls || []);
+
+    // Empty/null arguments become a valid empty object, never "" or null.
+    for (const call of calls) {
+      expect(typeof call.function.arguments).toBe("string");
+      expect(call.function.arguments.trim()).not.toBe("");
+      expect(() => JSON.parse(call.function.arguments)).not.toThrow();
+    }
+    // The repeated list does not re-announce call 0 on every delta.
+    expect(calls.map((c) => c.index)).toEqual([0, 1, 0, 1]);
+    expect(calls.filter((c) => c.index === 0)).toHaveLength(2);
+  });
+
+  it("normalizes non-streaming tool-call arguments", async () => {
+    const result = await wrapPerchNonStreaming(
+      new Response(JSON.stringify({ ok: true, text: "", toolCalls: [{ id: "t1", name: "bash", arguments: null }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      "qwen-3.8-max"
+    );
+    const json = await result.json();
+    expect(json.choices[0].message.tool_calls[0].function.arguments).toBe("{}");
+    expect(json.choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("only treats 403 tier_selection_required as the plan gate", () => {
     // 429/402 usage limits are not the plan gate; treating them as one wiped a
     // healthy plan state and swapped the real error for plan advice.

@@ -461,6 +461,23 @@ export function buildPerchRequestBody(model, body, extra = {}) {
   };
 }
 
+// Clients reject `arguments: ""` (or null) with "arguments must be a JSON object",
+// which surfaces as a malformed tool call. An empty argument set must be `{}`.
+function normalizeToolArguments(rawArgs) {
+  if (typeof rawArgs === "string") {
+    const trimmed = rawArgs.trim();
+    return trimmed ? rawArgs : "{}";
+  }
+  if (rawArgs && typeof rawArgs === "object") {
+    try {
+      return JSON.stringify(rawArgs);
+    } catch {
+      return "{}";
+    }
+  }
+  return "{}";
+}
+
 export function wrapPerchCompletionStream(response, model) {
   if (!response.ok || !response.body) return response;
 
@@ -469,6 +486,10 @@ export function wrapPerchCompletionStream(response, model) {
   let buffer = "";
   let done = false;
   let firstChunkSent = false;
+  // Perch emits the full running tool-call list on every delta. The OpenAI stream
+  // format addresses calls by stable index, so remember how many we already sent
+  // instead of re-numbering from 0 on each chunk (which made args overwrite).
+  let announcedToolCalls = 0;
   const chunkId = `chatcmpl-perch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -478,17 +499,24 @@ export function wrapPerchCompletionStream(response, model) {
       const fn = tc.function || {};
       const name = tc.name || fn.name || "";
       const rawArgs = tc.arguments !== undefined ? tc.arguments : fn.arguments;
-      const argumentsStr = typeof rawArgs === "string" ? rawArgs : (rawArgs ? JSON.stringify(rawArgs) : "");
       return {
         index: idx,
         id: tc.id || `call_${idx}`,
         type: "function",
         function: {
           name,
-          arguments: argumentsStr,
+          arguments: normalizeToolArguments(rawArgs),
         },
       };
     });
+  };
+
+  // Deltas repeat the whole list; only newly started calls are new information.
+  const formatNewToolCalls = (toolCalls) => {
+    const all = formatToolCalls(toolCalls);
+    const fresh = all.slice(announcedToolCalls);
+    announcedToolCalls = all.length;
+    return fresh;
   };
 
   const makeChunk = (delta, finishReason = null, usage = null) => {
@@ -544,7 +572,8 @@ export function wrapPerchCompletionStream(response, model) {
       const chunk = makeChunk({ reasoning_content: payload.text });
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
     } else if ((payload.type === "tool_call_delta" || payload.type === "tool_use_end") && Array.isArray(payload.toolCalls)) {
-      const formatted = formatToolCalls(payload.toolCalls);
+      const formatted = formatNewToolCalls(payload.toolCalls);
+      if (formatted.length === 0) return;
       const chunk = makeChunk({ tool_calls: formatted });
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
     } else if (payload.type === "error") {
@@ -627,7 +656,7 @@ export async function wrapPerchNonStreaming(response, model) {
     type: "function",
     function: {
       name: tc.name || tc.function?.name || "",
-      arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments || {}),
+      arguments: normalizeToolArguments(tc.arguments ?? tc.function?.arguments),
     },
   }));
   const finishReason = toolCalls.length ? "tool_calls" : "stop";
