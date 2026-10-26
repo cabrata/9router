@@ -1,7 +1,11 @@
 # v0.5.112 (2026-10-26)
 
 ## Fixes
-- **Perch AI**: match CLI session refresh lifecycle, auto-renew turn tickets, format streaming tool calls in OpenAI shape, and handle 403 not_authorized with token rotation
+- **Perch AI**: every Perch call crashed with `ReferenceError: proxyAwareFetch is not defined` (the fetch import was dropped during refactor); restore it
+- **Perch AI**: calls were refused with 403 `perch_surface_required` whenever the system prompt was shorter than 200 characters — the value Perch uses to recognise a real CLI session. Pad short system prompts on direct model calls, send `resendAfterOutput` like the CLI does, and stop sending the invented `manualModelOptionId`
+- **Perch AI**: surface `perch_surface_required` as a readable error instead of a silent dead stream, stop retrying surface gates after a token refresh, keep the real upstream error when a retry is worse, and stop reading the 403 body twice
+- **Perch AI plan**: check and select the plan through Perch's own `cli-plan` endpoint (the previous probe posted an empty `messages: []` and always got 400 "Missing messages.", so the gate was never detected); drop the non-existent `/plan`, `/roost-plan` and `/cli-context` selection paths, require `noticeVersion`, and only offer Starter (Pro is a link)
+- **Perch AI test**: the connection test posts to `cli-plan` and reports the account's real plan state instead of a bare 200; treat only 403 `tier_selection_required` as the plan gate (429/402 usage limits no longer masquerade as one)
 - **Perch AI login**: show the callback URL field in the browser login flow (previously missing), with login URL copy/open actions, a reusable server-side session after the modal closes, and manual-paste PKCE exchange without a verifier
 
 # v0.5.111 (2026-10-26)

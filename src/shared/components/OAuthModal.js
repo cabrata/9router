@@ -43,6 +43,151 @@ const PASTE_TOKEN_PROVIDERS = {
  * - Localhost: Auto callback via popup message
  * - Remote: Manual paste callback URL
  */
+
+// Perch AI plan setup — the same first-login step the Perch CLI performs.
+// Until a plan is picked, every Perch call fails with 403 tier_selection_required,
+// so after a successful login we show the choice inline and let the user apply it.
+function PerchPlanSetup({ onDone }) {
+  const [status, setStatus] = useState(null);
+  const [checking, setChecking] = useState(true);
+  const [applying, setApplying] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const check = useCallback(async () => {
+    setChecking(true);
+    try {
+      const res = await fetch("/api/oauth/perchai/plan/status");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not read Perch plan");
+      setStatus(data);
+    } catch (err) {
+      setStatus({ error: err.message });
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    check();
+  }, [check]);
+
+  const choosePlan = async (plan) => {
+    setApplying(plan);
+    setResult(null);
+    try {
+      const res = await fetch("/api/oauth/perchai/plan/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan }),
+      });
+      const data = await res.json();
+      setResult({ ...data, ok: res.ok && data.ok !== false });
+      if (res.ok && data.ok !== false) onDone?.();
+    } catch (err) {
+      setResult({ ok: false, error: err.message });
+    } finally {
+      setApplying(null);
+    }
+  };
+
+  const options = status?.options || [
+    { id: "starter", label: "Starter (Free)", free: true, description: "Free tier with starter models." },
+    { id: "pro", label: "Pro", free: false, description: "Full frontier model routing." },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start gap-2">
+        <span className="material-symbols-outlined text-base text-primary">tune</span>
+        <div>
+          <div className="text-sm font-medium">Perch plan setup</div>
+          <div className="text-xs text-text-muted">
+            Perch requires a plan before it accepts calls (the same step the Perch CLI asks for at first login).
+          </div>
+        </div>
+      </div>
+
+      {checking && (
+        <div className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg bg-sidebar/50">
+          <span className="material-symbols-outlined text-base text-primary animate-spin">progress_activity</span>
+          <span className="text-sm">Checking plan on this account…</span>
+        </div>
+      )}
+
+      {!checking && status?.error && (
+        <div className="px-3 py-2 rounded-lg text-sm bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
+          {status.error}
+          <button type="button" onClick={check} className="ml-2 underline">Retry</button>
+        </div>
+      )}
+
+      {!checking && status && !status.error && !status.required && (
+        <div className="px-3 py-2 rounded-lg text-sm bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+          Plan active{status.planLabel ? `: ${status.planLabel}` : ""}. You can change it below or keep the default.
+        </div>
+      )}
+
+      {!checking && status && !status.error && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {options.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              disabled={!!applying}
+              onClick={() => choosePlan(opt.id)}
+              className={`text-left rounded-lg border p-3 transition-colors disabled:opacity-60 ${
+                status.plan === opt.id || status.planLabel?.toLowerCase().startsWith(opt.id)
+                  ? "border-primary bg-primary/10"
+                  : "border-border hover:border-primary"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{opt.label}</span>
+                {applying === opt.id && (
+                  <span className="material-symbols-outlined text-base text-primary animate-spin">progress_activity</span>
+                )}
+              </div>
+              <div className="text-xs text-text-muted mt-1">{opt.description}</div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {result?.ok && (
+        <div className="px-3 py-2 rounded-lg text-sm bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+          Plan set{result.planLabel ? ` (${result.planLabel})` : ""} — Perch is ready to use.
+          {result.appliedVia === "stored-preference" && " The chosen plan is sent with every request."}
+        </div>
+      )}
+
+      {!result?.ok && result?.error && (
+        <div className="px-3 py-2 rounded-lg text-sm bg-yellow-500/10 text-yellow-700 dark:text-yellow-300 space-y-1">
+          <div>{result.error}</div>
+          {result.needsManualSelection && (
+            <button
+              type="button"
+              onClick={() => window.open(result.signupUrl || "https://chat.perchai.app", "_blank", "noopener")}
+              className="underline"
+            >
+              Open chat.perchai.app to pick the plan →
+            </button>
+          )}
+        </div>
+      )}
+
+      <p className="text-xs text-text-muted">
+        Starter is free and covers the starter models. Pro unlocks frontier models. Can be changed later in{" "}
+        <a href="https://chat.perchai.app" target="_blank" rel="noreferrer" className="text-primary hover:underline">
+          chat.perchai.app
+        </a>.
+      </p>
+    </div>
+  );
+}
+
+PerchPlanSetup.propTypes = {
+  onDone: PropTypes.func,
+};
 export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, onClose, oauthMeta, idcConfig }) {
   const [step, setStep] = useState("waiting"); // waiting | input | success | error
   const [authData, setAuthData] = useState(null);
@@ -1071,6 +1216,11 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
             <p className="text-sm text-text-muted mb-4">
               Your {providerInfo.name} account has been connected.
             </p>
+            {provider === "perchai" && (
+              <div className="text-left mb-4">
+                <PerchPlanSetup />
+              </div>
+            )}
             <Button onClick={handleClose} fullWidth>
               Done
             </Button>

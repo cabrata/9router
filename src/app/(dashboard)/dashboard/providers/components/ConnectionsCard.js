@@ -31,7 +31,7 @@ function CooldownTimer({ until }) {
 CooldownTimer.propTypes = { until: PropTypes.string.isRequired };
 
 // ── ConnectionRow ──────────────────────────────────────────────
-function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete }) {
+function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, onOpenPlan }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   const [isCooldown, setIsCooldown] = useState(false);
@@ -94,6 +94,12 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     ? connection.name || connection.email || connection.displayName || "OAuth Account"
     : connection.name;
 
+  // Perch AI: surface the plan (Starter/Pro) on the row — without one every call
+  // is rejected with tier_selection_required.
+  const isPerchConnection = (connection.provider || "").startsWith("perch");
+  const perchPlanLabel =
+    connection.providerSpecificData?.perchPlanLabel || connection.providerSpecificData?.perchPlan || null;
+
   const handleSelectProxy = async (poolId) => {
     setUpdatingProxy(true);
     try { await onUpdateProxy(poolId === "__none__" ? null : poolId); }
@@ -119,6 +125,17 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
               {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
             </Badge>
             {hasAnyProxy && <Badge variant={proxyBadgeVariant} size="sm">Proxy</Badge>}
+            {isPerchConnection && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenPlan?.(connection); }}
+                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                title="Perch requires a plan (Starter/Pro) before it accepts calls"
+              >
+                <span className="material-symbols-outlined text-sm">tune</span>
+                {perchPlanLabel ? `Plan: ${perchPlanLabel}` : "Set plan"}
+              </button>
+            )}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
             {connection.lastError && connection.isActive !== false && (
               <span className="text-xs text-red-500 truncate max-w-[300px]" title={connection.lastError}>{connection.lastError}</span>
@@ -192,6 +209,146 @@ ConnectionRow.propTypes = {
   onUpdateProxy: PropTypes.func,
   onEdit: PropTypes.func.isRequired,
   onDelete: PropTypes.func.isRequired,
+  onOpenPlan: PropTypes.func,
+};
+
+// ── PerchPlanModal ─────────────────────────────────────────────
+// Perch AI requires a plan (Starter free / Pro) before it accepts calls; without
+// one every request fails with 403 tier_selection_required. Same choice the Perch
+// CLI asks for at first login, applied in place and stored on the connection.
+function PerchPlanModal({ isOpen, connection, onClose, onApplied }) {
+  const [options, setOptions] = useState([]);
+  const [current, setCurrent] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [message, setMessage] = useState(null);
+
+  const connectionId = connection?.id || "";
+  const check = useCallback(async () => {
+    if (!connectionId) return;
+    setStatus("checking");
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/oauth/perchai/plan/status?connectionId=${encodeURIComponent(connectionId)}`, { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not read Perch plan");
+      setOptions(data.options || []);
+      setCurrent(data.plan || null);
+      setStatus(data.required ? "required" : "active");
+    } catch (err) {
+      setStatus("error");
+      setMessage({ type: "error", text: err.message });
+    }
+  }, [connectionId]);
+
+  useEffect(() => {
+    if (isOpen) check();
+  }, [isOpen, check]);
+
+  const apply = async (plan) => {
+    setBusy(plan);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/oauth/perchai/plan/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, connectionId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setMessage({
+          type: "warn",
+          text: data.error || "Plan could not be applied",
+          signupUrl: data.needsManualSelection ? data.signupUrl : null,
+        });
+      } else {
+        setMessage({ type: "ok", text: `Plan set to ${data.planLabel || data.plan}. Perch is ready.` });
+        setCurrent(data.plan || plan);
+        setStatus("active");
+        onApplied?.();
+      }
+    } catch (err) {
+      setMessage({ type: "error", text: err.message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} title="Perch AI Plan" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-text-muted">
+          Perch needs a plan on this account before it accepts requests — the same step the Perch CLI asks
+          for at first login. Pick one below; you can change it later at chat.perchai.app.
+        </p>
+
+        {status === "checking" && <p className="text-sm text-text-muted">Checking plan…</p>}
+
+        {status === "active" && (
+          <div className="px-3 py-2 rounded-lg text-sm bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+            Plan active{current ? `: ${current}` : ""}.
+          </div>
+        )}
+        {status === "required" && (
+          <div className="px-3 py-2 rounded-lg text-sm bg-yellow-500/10 text-yellow-700 dark:text-yellow-300">
+            No plan selected yet — requests fail until you choose one.
+          </div>
+        )}
+
+        {(options.length ? options : [
+          { id: "starter", label: "Starter (Free)", description: "Free tier with starter models." },
+          { id: "pro", label: "Pro", description: "Full frontier model routing." },
+        ]).map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            disabled={!!busy || status === "checking"}
+            onClick={() => apply(opt.id)}
+            className={`text-left rounded-lg border p-3 transition-colors disabled:opacity-60 ${
+              current === opt.id ? "border-primary bg-primary/10" : "border-border hover:border-primary"
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">{opt.label}</span>
+              {busy === opt.id && <span className="material-symbols-outlined text-base text-primary animate-spin">progress_activity</span>}
+            </div>
+            <div className="text-xs text-text-muted mt-1">{opt.description}</div>
+          </button>
+        ))}
+
+        {message && (
+          <div className={`px-3 py-2 rounded-lg text-sm ${
+            message.type === "ok"
+              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+              : message.type === "warn"
+                ? "bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+                : "bg-red-500/10 text-red-600 dark:text-red-400"
+          }`}>
+            <div>{message.text}</div>
+            {message.signupUrl && (
+              <a href={message.signupUrl} target="_blank" rel="noreferrer" className="underline">
+                Open chat.perchai.app to pick the plan →
+              </a>
+            )}
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <Button variant="secondary" fullWidth onClick={check} disabled={status === "checking" || !!busy}>
+            Re-check
+          </Button>
+          <Button variant="ghost" fullWidth onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+PerchPlanModal.propTypes = {
+  isOpen: PropTypes.bool.isRequired,
+  connection: PropTypes.object,
+  onClose: PropTypes.func.isRequired,
+  onApplied: PropTypes.func,
 };
 
 // ── AddApiKeyModal ─────────────────────────────────────────────
@@ -303,6 +460,7 @@ export default function ConnectionsCard({ providerId, isOAuth, loginProviderId =
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
+  const [planConnection, setPlanConnection] = useState(null);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("1");
   const [confirmState, setConfirmState] = useState(null);
@@ -455,6 +613,7 @@ export default function ConnectionsCard({ providerId, isOAuth, loginProviderId =
                   onUpdateProxy={(poolId) => handleUpdateProxy(conn.id, poolId)}
                   onEdit={() => { setSelectedConnection(conn); setShowEditModal(true); }}
                   onDelete={() => handleDelete(conn.id)}
+                  onOpenPlan={(target) => setPlanConnection(target)}
                 />
               ))}
             </div>
@@ -481,6 +640,12 @@ export default function ConnectionsCard({ providerId, isOAuth, loginProviderId =
         proxyPools={proxyPools}
         onSave={handleUpdateConnection}
         onClose={() => setShowEditModal(false)}
+      />
+      <PerchPlanModal
+        isOpen={!!planConnection}
+        connection={planConnection}
+        onApplied={fetch_}
+        onClose={() => setPlanConnection(null)}
       />
 
       {/* Confirm Modal */}

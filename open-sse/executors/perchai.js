@@ -18,46 +18,243 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-// Map friendly model IDs to Perch AI internal option IDs
-const MODEL_OPTIONS = {
-  "gemini-4-argon": "gemini-gemini-4-argon",
-  "claude-opus-5.5": "anthropic-claude-opus-5-5",
-  "claude-sonnet-5.5": "anthropic-claude-sonnet-5-5",
-  "claude-haiku-5.5": "anthropic-claude-haiku-5-5",
-  "gpt-6.1-sol": "azure-foundry-gpt-6-1-sol",
-  "gpt-6-sol": "azure-foundry-gpt-6-sol",
-  "gpt-6-luna": "azure-foundry-gpt-6-luna",
-  "gpt-5.6-sol": "azure-foundry-gpt-5-6-sol",
-  "gpt-5.6-luna": "azure-foundry-gpt-5-6-luna",
-  "gpt-5.6-terra": "azure-foundry-gpt-5-6-terra",
-  "grok-4.7": "azure-foundry-grok-4-7",
-  "grok-4.6": "bedrock-mantle-xai-grok-4-6",
-  "kimi-3.1-pro": "openrouter-moonshotai-kimi-k3-1-pro",
-  "kimi-3": "azure-foundry-fw-kimi-k3",
-  "kimi-2.7": "wandb-kimi-k2-7-code",
-  "deepseek-v4.1-flash": "dashscope-deepseek-v4-1-flash",
-  "deepseek-v4.1-flash-1017": "openrouter-deepseek-deepseek-v4-1-flash-1017",
-  "deepseek-v4": "wandb-deepseek-ai-deepseek-v4-pro",
-  "deepseek-flash-starter": "openrouter-deepseek-deepseek-v4-1-flash-1017-cloudflare",
-  "glm-5.3": "azure-foundry-fw-glm-5-3",
-  "glm-5.3-flash": "wandb-zai-org-glm-5-3-flash",
-  "glm-5.3-flash-starter": "openrouter-z-ai-glm-5-3-flash",
-  "glm-5.2": "wandb-zai-org-glm-5-2",
-  "qwen-3.8-max": "openrouter-qwen-qwen3-8-max-0902",
-  "qwen-3.8": "wandb-qwen-qwen3-8-27b",
-  "qwen-3.8-flash": "openrouter-qwen-qwen3-8-flash",
-  "qwen-3.7-plus": "fireworks-accounts-fireworks-models-qwen3p7-plus",
-  "minimax-m3": "wandb-minimax-m3",
-  "minimax-m3.1-flash-starter": "openrouter-minimax-minimax-m3-1-flash-free",
-  "beam-1.0": "wandb-reflection-beam-1-0-501b-a23b",
-  "beam-1.0-starter": "openrouter-reflection-beam-1-0-501b-a23b",
-  "nemotron-ultra": "wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b",
-  "nemotron-lightning": "wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b",
-  "laguna-s": "poolside-poolside-laguna-s-2-1",
-  "inkling": "fireworks-accounts-fireworks-models-inkling",
-};
+// Perch routes manual models by `preferredModelId` (the model id straight from the
+// request), exactly like the CLI. There is no separate option-id mapping to send.
 
 const ROOST_TIERS = new Set(["standard", "pro", "starter", "standard_max", "pro_max"]);
+
+// Plan gate: every Perch call is rejected with 403 tier_selection_required until
+// the account has picked a plan once (Starter free / Pro). The Perch CLI does this
+// at first login, and so do we — but a pasted token or a fresh signup can still hit it.
+export const PERCH_TIER_GATE_CODE = "tier_selection_required";
+const PERCH_PLAN_SIGNUP_URL = "https://chat.perchai.app";
+
+export function perchPlanNotice() {
+  return (
+    "Perch AI plan not selected for this account yet. Open the Perch AI connection in the dashboard, " +
+    'click "Plan", and pick Starter (free) or Pro — or open https://chat.perchai.app, sign in, and choose a plan'
+  );
+}
+
+// Only 403 carries the gate. 402/429 are usage limits (`usage_limit_reached`,
+// `starter_model_blocked`), and treating those as "pick a plan" would wipe a
+// perfectly good plan state and swap the real error for plan advice.
+// Without a body we cannot tell a gate from any other 403, so we stay quiet and
+// let the caller forward the real upstream error.
+export function isPerchTierGate(status, bodyText = "") {
+  if (status !== 403) return false;
+  const text = typeof bodyText === "string" ? bodyText : "";
+  if (!text) return false;
+  return text.includes(PERCH_TIER_GATE_CODE);
+}
+
+export const PERCH_SURFACE_GATE_CODE = "perch_surface_required";
+
+export const PERCH_SURFACE_GATE_NOTICE =
+  "Perch AI rejected this session as direct API access (perch_surface_required). Perch-hosted models are " +
+  "licensed for Perch Web, Desktop and CLI only; use the Perch CLI, or pick a model/plan that allows API access";
+
+// Perch only serves Perch-hosted models to clients it recognises as a real CLI
+// session. Measured against app.perchai.app (2026-10): a request is accepted only
+// when the system prompt is at least PERCH_MIN_SYSTEM_PROMPT_CHARS characters --
+// a 197-char prompt is rejected with 403 perch_surface_required while 200 chars
+// of padding is accepted. The trigger is the system prompt, not the tools,
+// messages, runId, ticket or headers (each of those was tested independently).
+//
+// A short custom system prompt (e.g. a coding agent's own) therefore 403s on
+// every call, which surfaces upstream as a silently dead turn. Pad the tail so
+// the prompt clears the floor; the note is deliberately generic so it does not
+// change how the model answers.
+const PERCH_MIN_SYSTEM_PROMPT_CHARS = 200;
+const PERCH_SYSTEM_PROMPT_PAD =
+  "Context: this session runs through the Perch CLI gateway. Tools available to the model execute " +
+  "locally in the user's workspace, so call them as they are defined and never assume their output. " +
+  "Keep answers direct and complete. This note is environment context, not part of the user's request.";
+
+function perchContentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => (typeof part === "string" ? part : part?.text || "")).join("");
+}
+
+export function ensurePerchSystemPromptLength(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const systemIndex = messages.findIndex((m) => m?.role === "system");
+  // Only pad an existing system prompt. Inventing one would shift the message
+  // order (breaking multimodal/image index assumptions), and a request without a
+  // system prompt is usually plain chat, which Perch does not gate.
+  if (systemIndex === -1) return messages;
+  const current = perchContentText(messages[systemIndex]?.content);
+  if (current.length >= PERCH_MIN_SYSTEM_PROMPT_CHARS) return messages;
+  const padded = [...messages];
+  const original = messages[systemIndex].content;
+  let content;
+  if (typeof original === "string") {
+    content = `${original}\n\n${PERCH_SYSTEM_PROMPT_PAD}`;
+  } else if (Array.isArray(original)) {
+    content = [...original, { type: "text", text: PERCH_SYSTEM_PROMPT_PAD }];
+  } else {
+    content = PERCH_SYSTEM_PROMPT_PAD;
+  }
+  padded[systemIndex] = { ...messages[systemIndex], content };
+  return padded;
+}
+
+export function parsePerchErrorPayload(bodyText) {
+  const text = typeof bodyText === "string" ? bodyText.trim() : "";
+  if (!text) return { error: "", errorCode: "" };
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      error: typeof parsed?.error === "string" ? parsed.error : "",
+      errorCode: parsed?.errorCode || parsed?.limit?.errorCode || "",
+      plan: parsed?.limit?.plan || parsed?.plan || null,
+    };
+  } catch {
+    return { error: text, errorCode: "" };
+  }
+}
+
+export function buildPerchTierGateBody(payload = {}) {
+  return JSON.stringify({
+    ok: false,
+    error: payload.error || perchPlanNotice(),
+    errorCode: PERCH_TIER_GATE_CODE,
+    limit: payload.limit || {
+      errorCode: PERCH_TIER_GATE_CODE,
+      limitKind: PERCH_TIER_GATE_CODE,
+      resetAt: null,
+      plan: payload.plan || null,
+      url: PERCH_PLAN_SIGNUP_URL,
+    },
+  });
+}
+
+// ponytail: cache the probed plan state per token so healthy calls don't pay an
+// extra upstream round-trip. Evicted as soon as a call proves the gate is cleared.
+export const perchPlanCache = new Map();
+const PERCH_PLAN_CACHE_MS = 10 * 60 * 1000;
+
+export function getCachedPerchPlan(token) {
+  const entry = token ? perchPlanCache.get(token) : null;
+  if (!entry || entry.expiresAt <= Date.now()) return null;
+  return entry;
+}
+
+export function rememberPerchPlan(token, { required, plan = null, notice = "" } = {}) {
+  if (!token) return;
+  // A cleared gate is permanent for this token — remember it for the whole process.
+  const ttl = required ? PERCH_PLAN_CACHE_MS : 24 * 60 * 60 * 1000;
+  perchPlanCache.set(token, { required: !!required, plan: plan || null, notice: notice || "", expiresAt: Date.now() + ttl });
+}
+
+export function resolvePerchPlanState(credentials) {
+  const data = credentials?.providerSpecificData || {};
+  return {
+    plan: data.perchPlan || data.roostChoice || null,
+    notice: data.perchPlanNotice || "",
+  };
+}
+
+export function applyPerchPlanState(credentials, token, planState) {
+  if (!credentials || !token) return;
+  const data = credentials.providerSpecificData || (credentials.providerSpecificData = {});
+  data.perchPlan = planState?.plan || null;
+  data.perchPlanNotice = planState?.required ? planState.notice || perchPlanNotice() : null;
+}
+
+export function buildPerchPlanProbeHeaders(token) {
+  return {
+    Accept: "application/json",
+    "User-Agent": "perchai-cli/2.4.118.0",
+    "x-perch-locale": "en",
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+// Plan endpoints exactly as the Perch CLI uses them (perch.mjs `cli-plan`).
+// GET  -> { ok, planRequired, starter: { noticeVersion, notice, ... }, proUrl }
+// POST -> { plan: "starter", noticeVersion } -> { ok, alreadyChosen? } | { error: errorCode }
+export const PERCH_CLI_PLAN_PATH = "/api/perch-terminal/cli-plan";
+
+/**
+ * Plan-gate check used by the turn-ticket step and the dashboard "Plan" tab.
+ *
+ * This used to POST model-call with `messages: []` and read a 403 out of it, but
+ * that endpoint answers 400 "Missing messages." for an empty request and 403
+ * perch_surface_required for everything else, so the gate was never detected.
+ * The CLI's own `cli-plan` endpoint is the authoritative, non-spending check.
+ */
+export async function probePerchPlan(appUrl, token, fetchFn = globalThis.fetch, proxyOptions = null) {
+  if (!token) return { required: false, plan: null, notice: "", noticeVersion: null, proUrl: null };
+  const cached = getCachedPerchPlan(token);
+  if (cached) {
+    return {
+      required: cached.required,
+      plan: cached.plan,
+      notice: cached.notice,
+      noticeVersion: cached.noticeVersion ?? null,
+      proUrl: cached.proUrl ?? null,
+    };
+  }
+
+  let payload = null;
+  try {
+    const res = await fetchFn(
+      `${(appUrl || "https://app.perchai.app").replace(/\/+$/, "")}${PERCH_CLI_PLAN_PATH}`,
+      { method: "GET", headers: buildPerchPlanProbeHeaders(token) },
+      proxyOptions
+    );
+    // 404 means the deployment predates cli-plan: treat as "no gate info".
+    if (res?.ok) payload = await res.json().catch(() => null);
+  } catch {
+    return { required: false, plan: null, notice: "", noticeVersion: null, proUrl: null };
+  }
+
+  const required = payload?.planRequired === true;
+  const state = {
+    required,
+    plan: payload?.starter ? "starter" : payload?.plan || cached?.plan || null,
+    notice: required ? payload?.starter?.notice || perchPlanNotice() : "",
+    noticeVersion: typeof payload?.starter?.noticeVersion === "string" ? payload.starter.noticeVersion : null,
+    proUrl: typeof payload?.proUrl === "string" ? payload.proUrl : PERCH_PLAN_SIGNUP_URL,
+  };
+  rememberPerchPlan(token, state);
+  return state;
+}
+
+/**
+ * Accept the Starter plan, the only plan the terminal API can select
+ * (the CLI offers Pro as a link to `proUrl`, not as an API call).
+ */
+export async function choosePerchStarterPlan(appUrl, token, noticeVersion, fetchFn = globalThis.fetch, proxyOptions = null) {
+  if (!token) return { ok: false, error: "Perch AI connection has no access token" };
+  if (!noticeVersion) return { ok: false, error: "Perch did not advertise a plan notice to accept. Pick the plan at chat.perchai.app." };
+  try {
+    const res = await fetchFn(
+      `${(appUrl || "https://app.perchai.app").replace(/\/+$/, "")}${PERCH_CLI_PLAN_PATH}`,
+      {
+        method: "POST",
+        headers: { ...buildPerchPlanProbeHeaders(token), "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: "starter", noticeVersion }),
+      },
+      proxyOptions
+    );
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.ok === false) {
+      return {
+        ok: false,
+        error: data?.error || `Perch rejected the plan selection (HTTP ${res.status})`,
+        errorCode: data?.errorCode || data?.error || null,
+        status: res.status,
+      };
+    }
+    perchPlanCache.delete(token);
+    return { ok: true, alreadyChosen: data.alreadyChosen === true };
+  } catch (error) {
+    return { ok: false, error: error?.message || "Could not reach Perch to select the plan" };
+  }
+}
 
 export const PERCH_SUPABASE_CONFIG = {
   url: "https://zlfuvsfjtgsdtqcaykia.supabase.co",
@@ -193,7 +390,16 @@ export async function getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions = 
       proxyOptions
     );
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // A plan gate means auth is fine but the account has not picked a plan:
+      // refreshing the token cannot help, so report it instead of returning null.
+      if (isPerchTierGate(res.status)) {
+        const bodyText = await res.text().catch(() => "");
+        const parsed = parsePerchErrorPayload(bodyText);
+        return { gate: { required: true, plan: parsed.plan || null, notice: perchPlanNotice() } };
+      }
+      return null;
+    }
     const data = await res.json();
     if (data?.ok && (data.ticket || data.token)) {
       const ticketStr = data.ticket || data.token;
@@ -215,14 +421,16 @@ export async function getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions = 
 export function buildPerchRequestBody(model, body, extra = {}) {
   const cleanModel = typeof model === "string" ? model.replace(/^perch(ai)?\//i, "").trim().toLowerCase() : "standard";
   const isTier = ROOST_TIERS.has(cleanModel);
-  const optionId = MODEL_OPTIONS[cleanModel] || null;
 
   const runId = extra?.runId || `cli-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const hasTicket = extra?.hasTicket !== false;
 
   return {
     request: {
-      messages: body?.messages || [],
+      // Tier ("roost") calls are routed through Perch's own harness and always
+      // carry a full prompt; padding them would only change their input. The
+      // surface gate bites on direct manual-model calls, so pad those.
+      messages: isTier ? body?.messages || [] : ensurePerchSystemPromptLength(body?.messages || []),
       ...(body?.tools?.length ? { tools: body.tools } : {}),
       ...(body?.max_tokens ? { maxTokens: body.max_tokens } : {}),
       ...(body?.max_completion_tokens ? { maxTokens: body.max_completion_tokens } : {}),
@@ -237,15 +445,19 @@ export function buildPerchRequestBody(model, body, extra = {}) {
     preferredModelId: isTier ? null : cleanModel,
     avoidModelIds: [],
     attribution: null,
+    // The CLI always asks for the held/output payload to be resent; without it
+    // Perch can stream a turn that never yields usable output.
+    resendAfterOutput: true,
     ...(isTier
       ? {
           roostModelChoice: cleanModel,
           roostReasoning: true,
           effort: { level: "high", orchestration: false },
         }
-      : {
-          manualModelOptionId: optionId || cleanModel,
-        }),
+      : // The CLI sends no model selector for manual picks: preferredModelId above
+        // is what routes the call. `manualModelOptionId` was a guess and made
+        // Perch answer 403 perch_surface_required on every manual-model call.
+        {}),
   };
 }
 
@@ -449,6 +661,17 @@ export async function wrapPerchNonStreaming(response, model) {
   });
 }
 
+// Read an error body without ever throwing or consuming the caller's response.
+async function readPerchErrorText(response) {
+  if (!response) return "";
+  try {
+    const source = typeof response.clone === "function" ? response.clone() : response;
+    return (await source.text()) || "";
+  } catch {
+    return "";
+  }
+}
+
 export class PerchAiExecutor extends BaseExecutor {
   constructor(provider = "perchai") {
     super(provider);
@@ -467,8 +690,48 @@ export class PerchAiExecutor extends BaseExecutor {
 
     const appUrl = credentials?.providerSpecificData?.appUrl || credentials?.appUrl || session?.appUrl || "https://app.perchai.app";
 
+    // Plan gate: the account must pick Starter once, exactly like the Perch CLI
+    // setup prompt (checked through its own cli-plan endpoint).
+    const storedPlan = resolvePerchPlanState(credentials);
+    let planState = await probePerchPlan(appUrl, token, fetchFn, proxyOptions);
+    if (!planState.plan && storedPlan.plan) planState.plan = storedPlan.plan;
+    if (!planState.required && planState.plan === null && storedPlan.notice) planState.notice = "";
+    rememberPerchPlan(token, planState);
+    applyPerchPlanState(credentials, token, planState);
+    if (planState.required) {
+      return {
+        response: new Response(buildPerchTierGateBody({ error: planState.notice, plan: planState.plan }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        }),
+        url: `${appUrl.replace(/\/+$/, "")}/api/perch-terminal/model-call`,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer <perch-token>",
+        },
+      };
+    }
+
     // Acquire or reuse Perch turn-ticket (matches CLI turn ticket minting)
     let ticketData = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+
+    // Turn-ticket can also carry the plan gate (no refresh will help, so stop early).
+    if (ticketData?.gate?.required) {
+      planState = ticketData.gate;
+      rememberPerchPlan(token, planState);
+      applyPerchPlanState(credentials, token, planState);
+      return {
+        response: new Response(buildPerchTierGateBody({ error: planState.notice, plan: planState.plan }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        }),
+        url: `${appUrl.replace(/\/+$/, "")}/api/perch-terminal/turn-ticket`,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer <perch-token>",
+        },
+      };
+    }
 
     // If turn-ticket failed with 401 and we have a refresh_token, refresh session and retry ticket
     if (!ticketData?.ticket && session?.refreshToken) {
@@ -504,34 +767,65 @@ export class PerchAiExecutor extends BaseExecutor {
 
     let response = await fetchFn(url, fetchOptions, proxyOptions);
 
-    // If 401 or 403 not_authorized occurs, attempt token refresh and single retry (matches CLI YLr/r6r)
+    // Read the 401/403 body once. The body used to be drained twice (the outer
+    // handler re-read a consumed stream), which threw and swallowed the retry.
+    let errorText = "";
     if (response.status === 401 || response.status === 403) {
+      errorText = await readPerchErrorText(response);
+    }
+
+    // Only real auth failures may retry after refreshing. `perch_surface_required`
+    // and other gates are not fixed by a new token, so they skip the retry.
+    const isAuthFailure = response.status === 401 || errorText.includes("not_authorized");
+    if (isAuthFailure && session?.refreshToken) {
       try {
-        const cloned = response.clone();
-        const errText = await cloned.text().catch(() => "");
-        const shouldRefresh = response.status === 401 || errText.includes("not_authorized") || errText.includes("perch_surface_required");
-        if (shouldRefresh && session?.refreshToken) {
-          perchTicketCache.delete(token);
-          const refreshed = await refreshPerchSession(session, fetchFn);
-          if (refreshed?.accessToken) {
-            session = refreshed;
-            token = refreshed.accessToken;
-            headers.Authorization = `Bearer ${token}`;
-            const retryTicket = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
-            if (retryTicket?.ticket) {
-              headers["x-perch-turn-ticket"] = retryTicket.ticket;
-              payload.runId = retryTicket.runId || payload.runId;
-              payload.clientSurface = "cli";
-            } else {
-              delete headers["x-perch-turn-ticket"];
-              delete payload.clientSurface;
-            }
-            fetchOptions.headers = headers;
-            fetchOptions.body = JSON.stringify(payload);
-            response = await fetchFn(url, fetchOptions, proxyOptions);
+        perchTicketCache.delete(token);
+        const refreshed = await refreshPerchSession(session, fetchFn);
+        if (refreshed?.accessToken) {
+          session = refreshed;
+          token = refreshed.accessToken;
+          headers.Authorization = `Bearer ${token}`;
+          const retryTicket = await getPerchTurnTicket(appUrl, token, fetchFn, proxyOptions);
+          if (retryTicket?.ticket) {
+            headers["x-perch-turn-ticket"] = retryTicket.ticket;
+            payload.runId = retryTicket.runId || payload.runId;
+            payload.clientSurface = "cli";
+          } else {
+            delete headers["x-perch-turn-ticket"];
+            delete payload.clientSurface;
+          }
+          fetchOptions.headers = headers;
+          fetchOptions.body = JSON.stringify(payload);
+          const retried = await fetchFn(url, fetchOptions, proxyOptions);
+          // Keep the first response when the retry did not improve on it, so the
+          // real upstream error is never replaced by an empty/opaque one.
+          if (retried.ok || !response.ok) {
+            response = retried;
+            errorText = retried.ok ? "" : await readPerchErrorText(retried);
           }
         }
       } catch {}
+    }
+
+    // Surface gate: Perch refused the session as "direct API access". Report it as
+    // a real error instead of handing back a 403 that reads like a dead turn.
+    if (response.status === 403 && errorText.includes(PERCH_SURFACE_GATE_CODE)) {
+      const parsed = parsePerchErrorPayload(errorText);
+      return {
+        response: new Response(
+          JSON.stringify({
+            ok: false,
+            error: parsed.error || PERCH_SURFACE_GATE_NOTICE,
+            errorCode: PERCH_SURFACE_GATE_CODE,
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } }
+        ),
+        url,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer <perch-token>",
+        },
+      };
     }
 
     let wrappedResponse;

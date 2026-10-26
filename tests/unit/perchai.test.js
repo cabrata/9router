@@ -10,6 +10,8 @@ import { FORMATS } from "open-sse/translator/formats.js";
 import {
   PerchAiExecutor,
   buildPerchRequestBody,
+  ensurePerchSystemPromptLength,
+  isPerchTierGate,
   wrapPerchCompletionStream,
   wrapPerchNonStreaming,
   resolvePerchToken,
@@ -87,13 +89,58 @@ describe("Perch AI Provider Integration", () => {
       messages: [{ role: "user", content: "solve" }],
     });
     expect(modelBody.preferredModelId).toBe("gpt-6.1-sol");
-    expect(modelBody.manualModelOptionId).toBe("azure-foundry-gpt-6-1-sol");
+    // The CLI sends no manualModelOptionId; sending one made Perch answer 403
+    // perch_surface_required on every manual-model call.
+    expect(modelBody.manualModelOptionId).toBeUndefined();
+    expect(modelBody.resendAfterOutput).toBe(true);
 
     const deepseekBody = buildPerchRequestBody("deepseek-v4.1-flash", {
       messages: [{ role: "user", content: "code" }],
     });
     expect(deepseekBody.preferredModelId).toBe("deepseek-v4.1-flash");
-    expect(deepseekBody.manualModelOptionId).toBe("dashscope-deepseek-v4-1-flash");
+    expect(deepseekBody.manualModelOptionId).toBeUndefined();
+  });
+
+  it("pads a short system prompt to Perch's 200-char surface floor", () => {
+    // Measured upstream: 197 chars is refused with 403 perch_surface_required,
+    // 200 is accepted. A short agent prompt therefore broke every Perch call.
+    const short = "You are CodeBuddy Code, an interactive CLI tool.";
+    const padded = ensurePerchSystemPromptLength([{ role: "system", content: short }, { role: "user", content: "hi" }]);
+    expect(padded[0].content.startsWith(short)).toBe(true);
+    expect(padded[0].content.length).toBeGreaterThanOrEqual(200);
+
+    // Long prompt is left byte-identical (no wasted tokens).
+    const long = "x".repeat(400);
+    const untouched = ensurePerchSystemPromptLength([{ role: "system", content: long }]);
+    expect(untouched[0].content).toBe(long);
+
+    // No system message: left untouched (adding one would reorder the conversation).
+    const plain = [{ role: "user", content: "hi" }];
+    expect(ensurePerchSystemPromptLength(plain)).toBe(plain);
+
+    // Array content (Anthropic-style blocks) keeps its text parts.
+    const blocks = ensurePerchSystemPromptLength([{ role: "system", content: [{ type: "text", text: short }] }]);
+    expect(Array.isArray(blocks[0].content)).toBe(true);
+    const joined = blocks[0].content.map((part) => part.text).join("");
+    expect(joined.length).toBeGreaterThanOrEqual(200);
+
+    // Applied to direct (manual) model calls, which is where the gate bites.
+    const body = buildPerchRequestBody("gpt-6.1-sol", { messages: [{ role: "system", content: short }] });
+    expect(body.request.messages[0].content.length).toBeGreaterThanOrEqual(200);
+
+    // Tier/roost calls go through Perch's own harness: prompt left untouched.
+    const tier = buildPerchRequestBody("standard", { messages: [{ role: "system", content: short }] });
+    expect(tier.request.messages[0].content).toBe(short);
+  });
+
+  it("only treats 403 tier_selection_required as the plan gate", () => {
+    // 429/402 usage limits are not the plan gate; treating them as one wiped a
+    // healthy plan state and swapped the real error for plan advice.
+    expect(isPerchTierGate(403, '{"errorCode":"tier_selection_required"}')).toBe(true);
+    expect(isPerchTierGate(429, '{"errorCode":"usage_limit_reached"}')).toBe(false);
+    expect(isPerchTierGate(402, '{"errorCode":"tier_selection_required"}')).toBe(false);
+    expect(isPerchTierGate(403, '{"errorCode":"perch_surface_required"}')).toBe(false);
+    expect(isPerchTierGate(403, "")).toBe(false);
   });
 
   it("resolves token from credentials or falls back to disk", () => {
@@ -415,9 +462,9 @@ describe("Perch AI Provider Integration", () => {
 
     const payload = JSON.parse(callInit.body);
     expect(payload.preferredModelId).toBe("gpt-6.1-sol");
-    expect(payload.manualModelOptionId).toBe("azure-foundry-gpt-6-1-sol");
+    expect(payload.manualModelOptionId).toBeUndefined();
     expect(payload.clientSurface).toBe("cli");
-    expect(payload.request.messages[0].content).toBe("Hi");
+    expect(payload.request.messages[0].content.startsWith("Hi")).toBe(true);
 
     const json = await result.response.json();
     expect(json.choices[0].message.content).toBe("Hello from Perch AI!");
@@ -444,7 +491,7 @@ describe("Perch AI Provider Integration", () => {
 
     const perchBody = buildPerchRequestBody("claude-opus-5.5", translated);
     expect(perchBody.preferredModelId).toBe("claude-opus-5.5");
-    expect(perchBody.manualModelOptionId).toBe("anthropic-claude-opus-5-5");
+    expect(perchBody.manualModelOptionId).toBeUndefined();
     expect(perchBody.request.messages.length).toBe(2);
   });
 
@@ -497,13 +544,15 @@ describe("Perch AI Provider Integration", () => {
   });
 
   it("contains perchai in OAUTH_TEST_CONFIG with refreshable: true", () => {
+    // Resolve from the test file, not the process cwd (vitest runs inside tests/).
     const testUtilsSrc = fs.readFileSync(
-      path.resolve("src/app/api/providers/[id]/test/testUtils.js"),
+      path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../src/app/api/providers/[id]/test/testUtils.js"),
       "utf-8"
     );
     expect(testUtilsSrc).toContain("perchai:");
     expect(testUtilsSrc).toMatch(/perchai:\s*\{[\s\S]*?refreshable:\s*true/);
-    expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/cli-context");
+    // Probe Perch's real plan endpoint (the CLI's cli-plan), not a guessed route.
+    expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/cli-plan");
   });
 
   it("calculates cost accurately for Perch AI models without NaN", () => {

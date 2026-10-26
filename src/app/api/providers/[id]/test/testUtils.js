@@ -172,18 +172,26 @@ const OAUTH_TEST_CONFIG = {
     useApiKey: true,
   },
   perchai: {
-    url: "https://app.perchai.app/api/perch-terminal/cli-context",
-    method: "POST",
+    // Perch's own plan endpoint (the one the CLI uses). It answers 200 with
+    // { planRequired } whether or not a plan is chosen, so the 403 handling below
+    // only fires for deployments that still gate the route directly.
+    url: "https://app.perchai.app/api/perch-terminal/cli-plan",
+    method: "GET",
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     extraHeaders: {
       Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": "perchai-cli/2.4.118",
+      "User-Agent": "perchai-cli/2.4.118.0",
       "x-perch-locale": "en",
     },
-    body: JSON.stringify({ query: "", includeIndex: false }),
     refreshable: true,
+    // A 403 here is tier_selection_required: the token is valid, the account just
+    // has not picked Starter yet. Keep the connection active and say so.
+    acceptStatuses: [403],
+    softFailMessage: {
+      403: 'Perch AI plan not selected yet — open the Perch AI connection\'s "Plan" step and pick Starter (free)',
+    },
+    softFailBodyIncludes: ["tier_selection_required"],
   },
 };
 
@@ -207,6 +215,11 @@ export function classifyOAuthProbeResult(res, config, bodyText = "") {
   // status (e.g. Grok CLI 402 spending-limit). Codex-style acceptStatuses:[400]
   // stays silent success — 400 there only proves auth, not a user-facing warning.
   if (!res.ok && config?.acceptStatuses?.includes(status)) {
+    // A provider can restrict which error codes get the soft treatment (Perch's
+    // 403 is only soft for tier_selection_required, not for real denials).
+    if (config.softFailBodyIncludes?.length && !config.softFailBodyIncludes.some((n) => bodyText.includes(n))) {
+      return { valid: false, error: parseProviderErrorMessage(bodyText, "Access denied"), soft: false };
+    }
     const softMap = config.softFailMessage || {};
     if (softMap[status]) {
       return { valid: true, error: softMap[status], soft: true };
@@ -460,6 +473,37 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
     if (config.body) fetchOpts.body = config.body;
     const res = await fetchWithConnectionProxy(testUrl, fetchOpts, effectiveProxy);
     const bodyText = !res.ok ? await res.text().catch(() => "") : "";
+
+    // Perch answers 200 on cli-plan whether or not a plan is chosen, so a 200 only
+    // proves the token. Say which plan the account actually has: without one every
+    // chat call is refused with tier_selection_required.
+    if (res.ok && connection.provider === "perchai") {
+      const planInfo = await res
+        .json()
+        .then((json) => ({
+          required: json?.planRequired === true,
+          noticeVersion: json?.starter?.noticeVersion || null,
+          notice: json?.starter?.notice || null,
+        }))
+        .catch(() => null);
+      if (planInfo?.required) {
+        return {
+          valid: true,
+          error: null,
+          warning:
+            'Perch AI plan not selected yet — open the Perch AI connection\'s "Plan" step and pick Starter (free)',
+          refreshed,
+          newTokens,
+        };
+      }
+      return {
+        valid: true,
+        error: null,
+        warning: planInfo ? "Perch AI connection is valid (token accepted by Perch)." : null,
+        refreshed,
+        newTokens,
+      };
+    }
 
     const classified = classifyOAuthProbeResult(res, config, bodyText);
     if (classified.valid) {
