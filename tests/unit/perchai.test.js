@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import REGISTRY from "open-sse/providers/registry/index.js";
 import { getExecutor } from "open-sse/executors/index.js";
-import { PROVIDER_MODELS, getDefaultModel, isValidModel } from "open-sse/config/providerModels.js";
+import { PROVIDER_MODELS, getDefaultModel, isValidModel, findModelName, getModelTargetFormat, getModelUpstreamId } from "open-sse/config/providerModels.js";
+import { translateRequest } from "open-sse/translator/index.js";
+import { detectFormat, getTargetFormat } from "open-sse/services/provider.js";
+import { FORMATS } from "open-sse/translator/formats.js";
 import {
   PerchAiExecutor,
   buildPerchRequestBody,
@@ -242,5 +245,78 @@ describe("Perch AI Provider Integration", () => {
 
     const json = await result.response.json();
     expect(json.choices[0].message.content).toBe("Hello from Perch AI!");
+  });
+
+  it("translates Claude format request to OpenAI format for Perch AI", () => {
+    const claudeBody = {
+      model: "perch/claude-opus-5.5",
+      max_tokens: 1024,
+      system: "You are a helpful coding assistant.",
+      messages: [{ role: "user", content: "Write a quicksort in JavaScript" }],
+    };
+
+    const sourceFormat = detectFormat(claudeBody);
+    expect(sourceFormat).toBe(FORMATS.CLAUDE);
+
+    const translated = translateRequest(sourceFormat, FORMATS.OPENAI, "perch/claude-opus-5.5", claudeBody);
+    expect(translated.messages).toBeDefined();
+    // Claude system prompt should be in messages
+    const systemMsg = translated.messages.find((m) => m.role === "system");
+    expect(systemMsg.content).toBe("You are a helpful coding assistant.");
+    const userMsg = translated.messages.find((m) => m.role === "user");
+    expect(userMsg.content).toBe("Write a quicksort in JavaScript");
+
+    const perchBody = buildPerchRequestBody("claude-opus-5.5", translated);
+    expect(perchBody.preferredModelId).toBe("claude-opus-5.5");
+    expect(perchBody.manualModelOptionId).toBe("anthropic-claude-opus-5-5");
+    expect(perchBody.request.messages.length).toBe(2);
+  });
+
+  it("resolves model names, target formats, and upstream IDs", () => {
+    expect(findModelName("perch", "gpt-6.1-sol")).toBe("GPT-6.1 Sol");
+    expect(findModelName("perch", "claude-opus-5.5")).toBe("Claude Opus 5.5");
+    expect(findModelName("perch", "standard")).toBe("Standard (Auto)");
+
+    // Target format defaults to OPENAI via getTargetFormat
+    expect(getTargetFormat("perch", "standard")).toBe(FORMATS.OPENAI);
+    expect(getTargetFormat("perch", "gpt-6.1-sol")).toBe(FORMATS.OPENAI);
+
+    // Upstream ID resolution
+    expect(getModelUpstreamId("perch", "gpt-6.1-sol")).toBe("gpt-6.1-sol");
+    expect(getModelUpstreamId("perch", "standard")).toBe("standard");
+  });
+
+  it("throws descriptive error when token is missing", async () => {
+    const executor = new PerchAiExecutor();
+    await expect(
+      executor.execute({
+        model: "standard",
+        body: { messages: [] },
+        stream: false,
+        credentials: {},
+      })
+    ).rejects.toThrow(/Perch AI requires authentication/);
+  });
+
+  it("returns error response when upstream fails with 401 Unauthorized", async () => {
+    const errorFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      headers: new Headers({ "Content-Type": "application/json" }),
+      text: async () => JSON.stringify({ ok: false, error: "Unauthorized", errorCode: "not_authenticated" }),
+    });
+
+    const executor = new PerchAiExecutor();
+    const result = await executor.execute({
+      model: "standard",
+      body: { messages: [] },
+      stream: false,
+      credentials: { apiKey: "invalid_key" },
+      fetchImpl: errorFetch,
+    });
+
+    expect(result.response.ok).toBe(false);
+    expect(result.response.status).toBe(401);
   });
 });
