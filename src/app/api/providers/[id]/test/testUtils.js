@@ -171,6 +171,17 @@ const OAUTH_TEST_CONFIG = {
     refreshable: true,
     useApiKey: true,
   },
+  perchai: {
+    url: "https://app.perchai.app/api/perch-terminal/public-model-default",
+    method: "GET",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: {
+      Accept: "application/json",
+      "User-Agent": "Perch-CLI/2.4.118",
+    },
+    refreshable: true,
+  },
 };
 
 /**

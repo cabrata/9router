@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import REGISTRY from "open-sse/providers/registry/index.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { PROVIDER_MODELS, getDefaultModel, isValidModel, findModelName, getModelTargetFormat, getModelUpstreamId } from "open-sse/config/providerModels.js";
@@ -318,5 +320,15 @@ describe("Perch AI Provider Integration", () => {
 
     expect(result.response.ok).toBe(false);
     expect(result.response.status).toBe(401);
+  });
+
+  it("contains perchai in OAUTH_TEST_CONFIG with refreshable: true", () => {
+    const testUtilsSrc = fs.readFileSync(
+      path.resolve("src/app/api/providers/[id]/test/testUtils.js"),
+      "utf-8"
+    );
+    expect(testUtilsSrc).toContain("perchai:");
+    expect(testUtilsSrc).toMatch(/perchai:\s*\{[\s\S]*?refreshable:\s*true/);
+    expect(testUtilsSrc).toContain("https://app.perchai.app/api/perch-terminal/public-model-default");
   });
 });
