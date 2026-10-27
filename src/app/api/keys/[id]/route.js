@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { deleteApiKey, getApiKeyById, updateApiKey } from "@/lib/localDb";
 import { ENDPOINT_KINDS } from "@/lib/requestLog.js";
 import { validateKeyAccessInput } from "@/shared/utils/keyAccess.js";
+import { normalizeApiKeyLimits } from "@/lib/db/repos/apiKeysRepo.js";
 
 // GET /api/keys/[id] - Get single key
 export async function GET(request, { params }) {
@@ -32,6 +33,8 @@ export async function PUT(request, { params }) {
 
     const isStrList = (v) => Array.isArray(v) && v.length <= 1000 && v.every((s) => typeof s === "string" && s.length > 0 && s.length <= 300);
     const updateData = {};
+    try { Object.assign(updateData, normalizeApiKeyLimits(body)); }
+    catch (error) { return NextResponse.json({ error: error.message }, { status: 400 }); }
     if (isActive !== undefined) updateData.isActive = !!isActive;
     if (name !== undefined) {
       if (typeof name !== "string" || !name.trim()) return NextResponse.json({ error: "Invalid name" }, { status: 400 });

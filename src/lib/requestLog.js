@@ -1,4 +1,4 @@
-import { requestLogStore, insertRequestLog } from "@/lib/db/repos/requestLogsRepo.js";
+import { requestLogStore, insertRequestLog, beginApiKeyRequest } from "@/lib/db/repos/requestLogsRepo.js";
 import { getApiKeyByKey } from "@/lib/db/repos/apiKeysRepo.js";
 import { getClientIp } from "@/lib/auth/loginLimiter";
 import { errorResponse } from "open-sse/utils/error.js";
@@ -95,9 +95,11 @@ export function withRequestLog(kind, handler) {
     };
 
     let done = false;
+    let requestLease = null;
     const finish = (status) => {
       if (done) return;
       done = true;
+      requestLease?.release();
       const end = Date.now();
       const durationMs = end - start;
       const ttftMs = ctx.ttftAt ? ctx.ttftAt - start : durationMs;
@@ -108,12 +110,29 @@ export function withRequestLog(kind, handler) {
     };
 
     let denied = null;
-    if (keyRec && !isEndpointAllowed(kind, keyRec.allowedEndpoints)) denied = `API key not allowed to use endpoint type: ${kind}`;
+    if (keyRec && !keyRec.isActive) denied = "API key is inactive";
+    else if (keyRec?.expiredAt && Date.parse(keyRec.expiredAt) <= start) denied = "API key has expired";
+    else if (keyRec && !isEndpointAllowed(kind, keyRec.allowedEndpoints)) denied = `API key not allowed to use endpoint type: ${kind}`;
     else if (keyRec && model && !isModelAllowed(model, keyRec.allowedModels)) denied = `API key not allowed to use model: ${model}`;
     if (denied) {
       ctx.error = denied;
       finish(403);
       return errorResponse(403, denied);
+    }
+
+    if (keyRec) {
+      requestLease = beginApiKeyRequest(keyRec, start);
+      if (!requestLease.ok) {
+        const rpmLimited = requestLease.reason === "rpm";
+        const message = rpmLimited
+          ? `API key requests-per-minute limit exceeded (${keyRec.rpm} RPM)`
+          : `API key concurrent request limit exceeded (${keyRec.limitConcurrent})`;
+        ctx.error = message;
+        const retryAfter = requestLease.retryAfter;
+        requestLease = null;
+        finish(429);
+        return errorResponse(429, message, rpmLimited ? { "Retry-After": String(retryAfter) } : null);
+      }
     }
 
     let response;
@@ -135,15 +154,31 @@ export function withRequestLog(kind, handler) {
       return response;
     }
 
-    const tap = new TransformStream({
-      transform(chunk, controller) {
-        if (!ctx.ttftAt) ctx.ttftAt = Date.now();
-        controller.enqueue(chunk);
+    const reader = response.body.getReader();
+    const body = new ReadableStream({
+      async pull(controller) {
+        try {
+          const result = await reader.read();
+          if (result.done) {
+            finish(status);
+            controller.close();
+            return;
+          }
+          if (!ctx.ttftAt) ctx.ttftAt = Date.now();
+          controller.enqueue(result.value);
+        } catch (error) {
+          ctx.error ||= error?.message || "response stream failed";
+          finish(status >= 400 ? status : 500);
+          controller.error(error);
+        }
       },
-      flush() { finish(status); },
-      cancel() { ctx.error ||= "client disconnected"; finish(status === 200 ? 499 : status); },
+      async cancel(reason) {
+        ctx.error ||= "client disconnected";
+        finish(status === 200 ? 499 : status);
+        await reader.cancel(reason).catch(() => {});
+      },
     });
-    return new Response(response.body.pipeThrough(tap), {
+    return new Response(body, {
       status, statusText: response.statusText, headers: response.headers,
     });
   };

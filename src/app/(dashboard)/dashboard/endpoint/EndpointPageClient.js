@@ -19,6 +19,7 @@ import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
 import KeyPermissionsModal from "./components/KeyPermissionsModal";
+import KeyLimitsModal from "./components/KeyLimitsModal";
 import KeyAccessControls from "./components/KeyAccessControls";
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
@@ -28,6 +29,7 @@ export default function APIPageClient({ machineId }) {
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
   const [permKey, setPermKey] = useState(null);
+  const [limitsKey, setLimitsKey] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
@@ -104,6 +106,13 @@ export default function APIPageClient({ machineId }) {
   useEffect(() => {
     fetchData();
     loadSettings();
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!document.hidden) fetchData();
+    }, 10_000);
+    return () => clearInterval(timer);
   }, []);
 
   // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
@@ -1052,11 +1061,23 @@ export default function APIPageClient({ machineId }) {
                       </button>
                     </div>
                   </div>
-                  <p className="text-xs text-text-muted mt-1">
-                    Created {new Date(key.createdAt).toLocaleDateString()}
-                  </p>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted mt-1">
+                    <span>Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                    <span>Expires {key.expiredAt ? new Date(key.expiredAt).toLocaleString() : "Never"}</span>
+                    <span>Concurrent {key.limitConcurrent || "Unlimited"}</span>
+                    <span>RPM {key.rpm || "Unlimited"}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted mt-1" aria-label="API key monitoring">
+                    <span>Active {key.monitoring?.activeRequests ?? 0}</span>
+                    <span>Last minute {key.monitoring?.requestsLastMinute ?? 0}</span>
+                    <span>24h {key.monitoring?.requestsLast24h ?? 0}</span>
+                    <span>Errors {key.monitoring?.errorsLast24h ?? 0}</span>
+                  </div>
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
+                  )}
+                  {key.expiredAt && new Date(key.expiredAt) <= new Date() && (
+                    <p className="text-xs text-red-500 mt-1">Expired</p>
                   )}
                   {(key.allowedModels?.length > 0 || key.allowedEndpoints?.length > 0) && (
                     <p className="text-xs text-brand-500 mt-1">
@@ -1076,10 +1097,18 @@ export default function APIPageClient({ machineId }) {
                     })}
                   />
                 </div>
-                <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                  <button
+                    onClick={() => setLimitsKey(key)}
+                    className="min-h-11 min-w-11 p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
+                    title="Expiration, limits, and monitoring"
+                    aria-label="Edit limits and view monitoring"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">speed</span>
+                  </button>
                   <button
                     onClick={() => setPermKey(key)}
-                    className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
+                    className="min-h-11 min-w-11 p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
                     title="Model & endpoint permissions"
                     aria-label="Edit permissions"
                   >
@@ -1106,7 +1135,9 @@ export default function APIPageClient({ machineId }) {
                   />
                   <button
                     onClick={() => handleDeleteKey(key.id)}
-                    className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                    className="min-h-11 min-w-11 p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                    title="Delete API key"
+                    aria-label="Delete API key"
                   >
                     <span className="material-symbols-outlined text-[18px]">delete</span>
                   </button>
@@ -1118,6 +1149,14 @@ export default function APIPageClient({ machineId }) {
       </Card>
 
       {/* Add Key Modal */}
+      {limitsKey && (
+        <KeyLimitsModal
+          key={limitsKey.id}
+          apiKey={keys.find((key) => key.id === limitsKey.id) || limitsKey}
+          onClose={() => setLimitsKey(null)}
+          onSaved={(updated) => setKeys((prev) => prev.map((key) => key.id === updated.id ? { ...key, ...updated } : key))}
+        />
+      )}
       {permKey && (
         <KeyPermissionsModal
           key={permKey.id}

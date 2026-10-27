@@ -3,6 +3,7 @@ import { getAdapter } from "./driver.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 import { keyAccessFromColumns, keyAccessToColumns, validateKeyAccessInput } from "@/shared/utils/keyAccess.js";
 import { KEY_ACCESS_UNRESTRICTED } from "@/shared/constants/keyAccess.js";
+import { normalizeApiKeyLimits } from "./repos/apiKeysRepo.js";
 
 // Settings
 export {
@@ -31,8 +32,10 @@ export {
 
 // API keys
 export {
-  getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
+  getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, deleteApiKey, validateApiKey, normalizeApiKeyLimits,
 } from "./repos/apiKeysRepo.js";
+
+export { getApiKeyMonitoring } from "./repos/requestLogsRepo.js";
 
 // Combos
 export {
@@ -79,7 +82,7 @@ export async function exportDb() {
     providerConnections: db.all(`SELECT * FROM providerConnections`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, provider: r.provider, authType: r.authType, name: r.name, email: r.email, priority: r.priority, isActive: r.isActive === 1, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     providerNodes: db.all(`SELECT * FROM providerNodes`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, type: r.type, name: r.name, createdAt: r.createdAt, updatedAt: r.updatedAt })),
     proxyPools: db.all(`SELECT * FROM proxyPools`).map((r) => ({ ...parseJson(r.data, {}), id: r.id, isActive: r.isActive === 1, testStatus: r.testStatus, createdAt: r.createdAt, updatedAt: r.updatedAt })),
-    apiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ id: r.id, key: r.key, name: r.name, machineId: r.machineId, isActive: r.isActive === 1, createdAt: r.createdAt, allowedModels: parseJson(r.allowedModels, null), allowedEndpoints: parseJson(r.allowedEndpoints, null), access: keyAccessFromColumns(r.accessRestricted, r.accessAllow) })),
+    apiKeys: db.all(`SELECT * FROM apiKeys`).map((r) => ({ id: r.id, key: r.key, name: r.name, machineId: r.machineId, isActive: r.isActive === 1, expiredAt: r.expiredAt || null, limitConcurrent: Number(r.limitConcurrent) || 0, rpm: Number(r.rpm) || 0, createdAt: r.createdAt, allowedModels: parseJson(r.allowedModels, null), allowedEndpoints: parseJson(r.allowedEndpoints, null), access: keyAccessFromColumns(r.accessRestricted, r.accessAllow) })),
     combos: db.all(`SELECT * FROM combos`).map((r) => ({ id: r.id, name: r.name, kind: r.kind, models: parseJson(r.models, []), createdAt: r.createdAt, updatedAt: r.updatedAt })),
     modelAliases: {},
     customModels: [],
@@ -147,9 +150,12 @@ export async function importDb(payload) {
         access = checked.value;
       }
       const cols = keyAccessToColumns(access);
+      let limits;
+      try { limits = normalizeApiKeyLimits(k); }
+      catch (error) { throw new Error(`apiKeys ${k.id}: ${error.message}`); }
       db.run(
-        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, allowedModels, allowedEndpoints, accessRestricted, accessAllow) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(), k.allowedModels?.length ? stringifyJson(k.allowedModels) : null, k.allowedEndpoints?.length ? stringifyJson(k.allowedEndpoints) : null, cols.accessRestricted, cols.accessAllow]
+        `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, expiredAt, limitConcurrent, rpm, createdAt, allowedModels, allowedEndpoints, accessRestricted, accessAllow) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, limits.expiredAt ?? null, limits.limitConcurrent ?? 0, limits.rpm ?? 0, k.createdAt || new Date().toISOString(), k.allowedModels?.length ? stringifyJson(k.allowedModels) : null, k.allowedEndpoints?.length ? stringifyJson(k.allowedEndpoints) : null, cols.accessRestricted, cols.accessAllow]
       );
     }
     for (const c of payload.combos || []) {

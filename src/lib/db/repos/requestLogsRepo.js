@@ -4,6 +4,56 @@ import { getAdapter } from "../driver.js";
 // Per-request context set by withRequestLog(); saveRequestUsage() adds tokens into it.
 // On globalThis because Next bundles each route separately (module copies may differ).
 export const requestLogStore = globalThis.__9rRequestLogStore ||= new AsyncLocalStorage();
+const keyRequestState = globalThis.__9rKeyRequestState ||= new Map();
+const MINUTE_MS = 60_000;
+
+function localState(apiKeyId, now = Date.now()) {
+  let state = keyRequestState.get(apiKeyId);
+  if (!state) keyRequestState.set(apiKeyId, state = { activeRequests: 0, requestTimes: [] });
+  state.requestTimes = state.requestTimes.filter((time) => time > now - MINUTE_MS);
+  return state;
+}
+
+export function beginApiKeyRequest(apiKey, now = Date.now()) {
+  const state = localState(apiKey.id, now);
+  if (apiKey.rpm > 0 && state.requestTimes.length >= apiKey.rpm) {
+    return { ok: false, reason: "rpm", retryAfter: Math.max(1, Math.ceil((state.requestTimes[0] + MINUTE_MS - now) / 1000)) };
+  }
+  if (apiKey.limitConcurrent > 0 && state.activeRequests >= apiKey.limitConcurrent) {
+    return { ok: false, reason: "concurrency" };
+  }
+  state.requestTimes.push(now);
+  state.activeRequests++;
+  let released = false;
+  return {
+    ok: true,
+    release() {
+      if (released) return;
+      released = true;
+      state.activeRequests = Math.max(0, state.activeRequests - 1);
+    },
+  };
+}
+
+export async function getApiKeyMonitoring(apiKeyId, now = Date.now()) {
+  const state = localState(apiKeyId, now);
+  const db = await getAdapter();
+  const since = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+  const row = db.get(
+    `SELECT SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) AS requestsLast24h,
+            SUM(CASE WHEN timestamp >= ? AND status >= 400 THEN 1 ELSE 0 END) AS errorsLast24h,
+            MAX(timestamp) AS lastRequestAt
+       FROM requestLogs WHERE apiKeyId = ?`,
+    [since, since, apiKeyId]
+  );
+  return {
+    activeRequests: state.activeRequests,
+    requestsLastMinute: state.requestTimes.length,
+    requestsLast24h: Number(row?.requestsLast24h) || 0,
+    errorsLast24h: Number(row?.errorsLast24h) || 0,
+    lastRequestAt: row?.lastRequestAt || null,
+  };
+}
 
 // ponytail: fixed row cap, pruned every PRUNE_EVERY inserts. Make it a setting if users ask.
 const MAX_ROWS = parseInt(process.env.REQUEST_LOGS_MAX || "5000", 10);
