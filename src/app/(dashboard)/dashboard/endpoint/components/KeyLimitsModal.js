@@ -59,7 +59,7 @@ export default function KeyLimitsModal({ apiKey, onClose, onSaved }) {
               ["Errors (24h)", monitoring.errorsLast24h ?? 0],
             ].map(([label, value]) => (
               <div key={label} className="bg-surface-2 rounded-[10px] p-3 min-w-0">
-                <dt className="text-xs text-text-muted">{label}</dt>
+                <dt className="text-xs text-[#5F6673] dark:text-text-muted">{label}</dt>
                 <dd className="text-lg font-semibold mt-0.5 tabular-nums">{value}</dd>
               </div>
             ))}
@@ -71,6 +71,8 @@ export default function KeyLimitsModal({ apiKey, onClose, onSaved }) {
 
         <section aria-labelledby="key-limits-heading" className="flex flex-col gap-4">
           <h3 id="key-limits-heading" className="text-sm font-semibold">Request limits</h3>
+          <p id="key-limits-hint" className="text-xs text-text-muted">Changes apply to new requests right away. 0 means unlimited.</p>
+          <fieldset aria-describedby="key-limits-hint" className="flex flex-col gap-4">
           <label className="flex items-center gap-3 min-h-11 cursor-pointer">
             <input
               type="checkbox"
@@ -110,6 +112,7 @@ export default function KeyLimitsModal({ apiKey, onClose, onSaved }) {
             />
           </div>
           <p className="text-xs text-text-muted">Current expiration: {displayDate(apiKey.expiredAt)}</p>
+          </fieldset>
         </section>
 
         {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
