@@ -1,3 +1,9 @@
+# v0.5.113 (2026-10-27)
+
+## Features
+- **API keys**: per-key expiration date (or Never), concurrent request limit, and requests-per-minute limit; limits are enforced before the request runs — expired/inactive keys get 403, over-limit keys get 429 with `Retry-After` on RPM
+- **API keys**: live per-key monitoring in the dashboard (active requests, requests in the last minute, 24h request/error totals, last request time) with a limits editor modal on each key
+
 # v0.5.112 (2026-10-26)
 
 ## Fixes
