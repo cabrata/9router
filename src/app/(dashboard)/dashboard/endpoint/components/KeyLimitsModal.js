@@ -54,6 +54,7 @@ export default function KeyLimitsModal({ apiKey, onClose, onSaved }) {
           <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {[
               ["Active", monitoring.activeRequests ?? 0],
+              ["Queued", monitoring.queuedRequests ?? 0],
               ["Last minute", monitoring.requestsLastMinute ?? 0],
               ["Last 24 hours", monitoring.requestsLast24h ?? 0],
               ["Errors (24h)", monitoring.errorsLast24h ?? 0],

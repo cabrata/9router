@@ -1069,6 +1069,7 @@ export default function APIPageClient({ machineId }) {
                   </div>
                   <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted mt-1" aria-label="API key monitoring">
                     <span>Active {key.monitoring?.activeRequests ?? 0}</span>
+                    <span>Queued {key.monitoring?.queuedRequests ?? 0}</span>
                     <span>Last minute {key.monitoring?.requestsLastMinute ?? 0}</span>
                     <span>24h {key.monitoring?.requestsLast24h ?? 0}</span>
                     <span>Errors {key.monitoring?.errorsLast24h ?? 0}</span>

@@ -53,8 +53,33 @@ describe("API key expiration and request limits", () => {
     expect(await db.getApiKeyById(key.id)).toMatchObject({ expiredAt, limitConcurrent: 2, rpm: 3 });
   });
 
-  it("holds concurrency until completion or cancellation and enforces RPM", async () => {
+  it("queues requests above the concurrency limit instead of rejecting them", async () => {
+    const key = await db.createApiKey("queued", "machine", { limitConcurrent: 1 });
+    let finishFirst;
+    const gate = new Promise((resolve) => { finishFirst = resolve; });
+    const first = requestLog.withRequestLog(
+      "chat",
+      async () => new Response(await gate.then(() => "first"), { status: 200 })
+    )(requestFor(key.key));
+    const started = [];
+    const second = requestLog.withRequestLog("chat", async () => {
+      started.push("second");
+      return new Response("second", { status: 200 });
+    })(requestFor(key.key));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(started).toEqual([]);
+    const queuedMonitoring = await logs.getApiKeyMonitoring(key.id);
+    expect(queuedMonitoring.queuedRequests).toBe(1);
+    finishFirst();
+    expect(await (await first).text()).toBe("first");
+    expect(await (await second).status).toBe(200);
+    expect(started).toEqual(["second"]);
+  });
+
+  it("holds concurrency via streaming release and enforces RPM", async () => {
     const key = await db.createApiKey("limited", "machine", { limitConcurrent: 1, rpm: 2 });
+    // Reserve one RPM slot in the past so the queue can grant the second request,
+    // then the third request arrives over the RPM ceiling.
     let controllers = [];
     const handler = vi.fn(async () => new Response(new ReadableStream({
       start(controller) {
@@ -66,17 +91,17 @@ describe("API key expiration and request limits", () => {
 
     const first = await wrapped(requestFor(key.key));
     expect((await logs.getApiKeyMonitoring(key.id)).activeRequests).toBe(1);
-    const concurrent = await wrapped(requestFor(key.key));
-    expect(concurrent.status).toBe(429);
-    expect(await concurrent.text()).toContain("concurrent request limit");
+    const queuedPromise = wrapped(requestFor(key.key));
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await logs.getApiKeyMonitoring(key.id)).queuedRequests).toBe(1);
 
     await first.body.cancel();
-    expect((await logs.getApiKeyMonitoring(key.id)).activeRequests).toBe(0);
-
-    const second = await wrapped(requestFor(key.key));
+    const queued = await queuedPromise;
+    expect(queued.status).toBe(200);
     controllers.at(-1).close();
-    await second.text();
+    await queued.text();
     expect((await logs.getApiKeyMonitoring(key.id)).activeRequests).toBe(0);
+    expect((await logs.getApiKeyMonitoring(key.id)).queuedRequests).toBe(0);
 
     const rpm = await wrapped(requestFor(key.key));
     expect(rpm.status).toBe(429);
@@ -87,7 +112,7 @@ describe("API key expiration and request limits", () => {
     const monitoring = await logs.getApiKeyMonitoring(key.id);
     expect(monitoring).toMatchObject({ activeRequests: 0, requestsLastMinute: 2 });
     expect(monitoring.requestsLast24h).toBeGreaterThanOrEqual(3);
-    expect(monitoring.errorsLast24h).toBeGreaterThanOrEqual(2);
+    expect(monitoring.errorsLast24h).toBeGreaterThanOrEqual(1);
     expect(monitoring.lastRequestAt).toMatch(/^\d{4}-/);
   });
 });

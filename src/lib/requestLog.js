@@ -1,4 +1,4 @@
-import { requestLogStore, insertRequestLog, beginApiKeyRequest } from "@/lib/db/repos/requestLogsRepo.js";
+import { requestLogStore, insertRequestLog, acquireApiKeyRequest } from "@/lib/db/repos/requestLogsRepo.js";
 import { getApiKeyByKey } from "@/lib/db/repos/apiKeysRepo.js";
 import { getClientIp } from "@/lib/auth/loginLimiter";
 import { errorResponse } from "open-sse/utils/error.js";
@@ -121,17 +121,20 @@ export function withRequestLog(kind, handler) {
     }
 
     if (keyRec) {
-      requestLease = beginApiKeyRequest(keyRec, start);
+      // RPM fails fast with 429; concurrency waits in the FIFO queue until a slot frees up.
+      requestLease = await acquireApiKeyRequest(keyRec, request.signal, start);
       if (!requestLease.ok) {
-        const rpmLimited = requestLease.reason === "rpm";
-        const message = rpmLimited
-          ? `API key requests-per-minute limit exceeded (${keyRec.rpm} RPM)`
-          : `API key concurrent request limit exceeded (${keyRec.limitConcurrent})`;
+        if (requestLease.reason === "aborted") {
+          ctx.error = "client disconnected while queued";
+          finish(499);
+          return errorResponse(499, "Client closed while waiting for an available slot");
+        }
+        const message = `API key requests-per-minute limit exceeded (${keyRec.rpm} RPM)`;
         ctx.error = message;
         const retryAfter = requestLease.retryAfter;
         requestLease = null;
         finish(429);
-        return errorResponse(429, message, rpmLimited ? { "Retry-After": String(retryAfter) } : null);
+        return errorResponse(429, message, { "Retry-After": String(retryAfter) });
       }
     }
 

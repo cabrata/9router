@@ -6,23 +6,17 @@ import { getAdapter } from "../driver.js";
 export const requestLogStore = globalThis.__9rRequestLogStore ||= new AsyncLocalStorage();
 const keyRequestState = globalThis.__9rKeyRequestState ||= new Map();
 const MINUTE_MS = 60_000;
+// ponytail: unbounded in-memory FIFO queue per key; upgrade to bounded/timeout queue if users ask.
 
 function localState(apiKeyId, now = Date.now()) {
   let state = keyRequestState.get(apiKeyId);
-  if (!state) keyRequestState.set(apiKeyId, state = { activeRequests: 0, requestTimes: [] });
+  if (!state) keyRequestState.set(apiKeyId, state = { activeRequests: 0, requestTimes: [], queue: [] });
   state.requestTimes = state.requestTimes.filter((time) => time > now - MINUTE_MS);
   return state;
 }
 
-export function beginApiKeyRequest(apiKey, now = Date.now()) {
-  const state = localState(apiKey.id, now);
-  if (apiKey.rpm > 0 && state.requestTimes.length >= apiKey.rpm) {
-    return { ok: false, reason: "rpm", retryAfter: Math.max(1, Math.ceil((state.requestTimes[0] + MINUTE_MS - now) / 1000)) };
-  }
-  if (apiKey.limitConcurrent > 0 && state.activeRequests >= apiKey.limitConcurrent) {
-    return { ok: false, reason: "concurrency" };
-  }
-  state.requestTimes.push(now);
+function grantSlot(state, now) {
+  if (now) state.requestTimes.push(now);
   state.activeRequests++;
   let released = false;
   return {
@@ -31,8 +25,44 @@ export function beginApiKeyRequest(apiKey, now = Date.now()) {
       if (released) return;
       released = true;
       state.activeRequests = Math.max(0, state.activeRequests - 1);
+      // Wake queued waiters while a slot is free, in arrival order.
+      while (state.queue.length > 0) {
+        const waiter = state.queue[0];
+        if (waiter.signal?.aborted) { state.queue.shift(); continue; }
+        const waiterLimit = waiter.key.limitConcurrent || 0;
+        if (waiterLimit > 0 && state.activeRequests >= waiterLimit) break;
+        state.queue.shift();
+        waiter.resolve(grantSlot(state, Date.now()));
+      }
     },
   };
+}
+
+export function acquireApiKeyRequest(apiKey, signal, now = Date.now()) {
+  const state = localState(apiKey.id, now);
+  // RPM is checked immediately so queued requests don't silently starve the quota.
+  if (apiKey.rpm > 0 && state.requestTimes.length >= apiKey.rpm) {
+    return Promise.resolve({ ok: false, reason: "rpm", retryAfter: Math.max(1, Math.ceil((state.requestTimes[0] + MINUTE_MS - now) / 1000)) });
+  }
+  const limit = apiKey.limitConcurrent || 0;
+  if (limit === 0 || (state.queue.length === 0 && state.activeRequests < limit)) {
+    return Promise.resolve(grantSlot(state, now));
+  }
+  // FIFO wait until a slot frees up. Don't reserve RPM here on purpose: the
+  // quota is counted on grant instead, so waiting in the queue doesn't burn it.
+  return new Promise((resolve) => {
+    const waiter = { key: apiKey, resolve, signal };
+    const cleanup = () => signal?.removeEventListener?.("abort", onAbort);
+    const onAbort = () => {
+      const idx = state.queue.indexOf(waiter);
+      if (idx >= 0) state.queue.splice(idx, 1);
+      resolve({ ok: false, reason: "aborted" });
+    };
+    waiter.resolve = (lease) => { cleanup(); resolve(lease); };
+    if (signal?.aborted) { resolve({ ok: false, reason: "aborted" }); return; }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    state.queue.push(waiter);
+  });
 }
 
 export async function getApiKeyMonitoring(apiKeyId, now = Date.now()) {
@@ -48,6 +78,7 @@ export async function getApiKeyMonitoring(apiKeyId, now = Date.now()) {
   );
   return {
     activeRequests: state.activeRequests,
+    queuedRequests: state.queue.length,
     requestsLastMinute: state.requestTimes.length,
     requestsLast24h: Number(row?.requestsLast24h) || 0,
     errorsLast24h: Number(row?.errorsLast24h) || 0,
