@@ -115,6 +115,17 @@ export async function insertRequestLog(entry) {
   }
 }
 
+// Compat provider IDs look like "openai-compatible-chat-<uuid>"; show the user-chosen
+// node name instead. Falls back to the prefix, then a short id.
+function providerLabel(provider, nodes, aliases) {
+  if (!provider) return provider;
+  if (nodes[provider]) return nodes[provider];
+  const target = aliases[provider];
+  if (typeof target === "string" && target.includes("/")) return target.slice(0, target.indexOf("/"));
+  const m = /^(openai|anthropic)-compatible-(?:responses-)?[0-9a-f]{8}-/i.exec(provider);
+  return m ? `${m[1]}-compatible-${provider.slice(-4)}` : provider;
+}
+
 export async function getRequestLogs(filter = {}) {
   const db = await getAdapter();
   const conds = [];
@@ -138,7 +149,15 @@ export async function getRequestLogs(filter = {}) {
   const logs = db.all(
     `SELECT * FROM requestLogs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
     [...params, pageSize, (page - 1) * pageSize]
-  ).map((r) => ({ ...r, stream: r.stream === 1 }));
+  );
+  if (logs.some((r) => r.provider && !r.provider.includes("/") && /-compatible-/.test(r.provider))) {
+    const { getProviderNodes } = await import("./nodesRepo.js");
+    const { getModelAliases } = await import("./aliasRepo.js");
+    const [nodeList, aliases] = await Promise.all([getProviderNodes().catch(() => []), getModelAliases().catch(() => ({}))]);
+    const nodes = Object.fromEntries(nodeList.map((n) => [n.id, n.name]));
+    for (const r of logs) r.provider = providerLabel(r.provider, nodes, aliases);
+  }
+  for (const r of logs) r.stream = r.stream === 1;
   return { logs, pagination: { page, pageSize, totalItems: total, totalPages: Math.ceil(total / pageSize) } };
 }
 
