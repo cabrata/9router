@@ -1,3 +1,8 @@
+# v0.5.114 (2026-10-31)
+
+## Fixes
+- **Request logs**: custom (OpenAI/Anthropic compatible) providers showed their raw node id (`openai-compatible-chat-<uuid>`) as the provider; show the node name instead (node prefix, then a short id as fallback), with no change to stored data
+
 # v0.5.113 (2026-10-27)
 
 ## Features
