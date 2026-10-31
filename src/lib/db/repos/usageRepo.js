@@ -16,6 +16,7 @@ const PENDING_TIMEOUT_MS = 60 * 1000;
 const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
+const VALID_PERIODS = new Set(["today", "24h", "7d", "30d", "60d", "all"]);
 
 // In-memory state shared across Next.js modules
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
@@ -224,6 +225,8 @@ export async function getActiveRequests() {
         timestamp: e.timestamp, model: e.model, provider: e.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
+        cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
+        cost: e.cost || 0,
         status: e.status || "ok",
       };
     })
@@ -258,7 +261,7 @@ export async function saveRequestUsage(entry) {
 
     // All 3 writes (history insert, daily upsert, lifetime counter) in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
-    db.transaction(() => {
+    const row = db.transaction(() => {
       const existing = db.get(
         `SELECT id, endpoint FROM usageHistory
          WHERE timestamp = ?
@@ -280,10 +283,10 @@ export async function saveRequestUsage(entry) {
         if (!existing.endpoint && entry.endpoint) {
           db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
         }
-        return;
+        return null;
       }
 
-      db.run(
+      const res = db.run(
         `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           entry.timestamp, entry.provider || null, entry.model || null,
@@ -294,8 +297,8 @@ export async function saveRequestUsage(entry) {
       );
 
       const dateKey = getLocalDateKey(entry.timestamp);
-      const row = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
-      const day = row ? parseJson(row.data, {}) : {
+      const dayRow = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
+      const day = dayRow ? parseJson(dayRow.data, {}) : {
         requests: 0, promptTokens: 0, completionTokens: 0, cost: 0,
         byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
       };
@@ -307,10 +310,17 @@ export async function saveRequestUsage(entry) {
       const next = (cur ? parseInt(cur.value, 10) : 0) + 1;
       db.run(`INSERT INTO _meta(key, value) VALUES('totalRequestsLifetime', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [String(next)]);
       inserted = true;
+      return {
+        id: res?.lastInsertRowid,
+        timestamp: entry.timestamp, provider: entry.provider || "", model: entry.model || "",
+        promptTokens, completionTokens, cachedTokens: tokens.cached_tokens || tokens.cache_read_input_tokens || 0,
+        cost: entry.cost || 0, status: entry.status || "ok",
+      };
     });
 
     if (inserted) {
       pushToRing(entry);
+      if (row) statsEmitter.emit("live", row);
       scheduleStatsEvent("update", 250);
     }
   } catch (e) {
@@ -673,6 +683,124 @@ export async function getUsageStats(period = "all") {
 
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
   return stats;
+}
+
+// Cache used by the realtime stream: period totals that survive refresh events.
+// `snapshotId` is MAX(id) at process start: rows at or below it are covered by
+// each period's full first read, rows above it are patched in.
+if (!global._realtimeSummaryCache) global._realtimeSummaryCache = { map: new Map(), snapshotId: null };
+const SUMMARY_CACHE_MAX = 6;
+
+/**
+ * Aggregate totals for one period, patched incrementally from newly inserted
+ * usage rows. Today/24h filter by timestamp, the rest are bounded day rollups.
+ */
+export async function getRealtimeSummary(period = "today") {
+  if (!VALID_PERIODS.has(period)) return null;
+  const db = await getAdapter();
+  const cache = global._realtimeSummaryCache;
+  const all = (sql, params) => {
+    const rows = db.all(sql, params);
+    return Array.isArray(rows) ? rows : [];
+  };
+
+  const lastUsageId = db.get(`SELECT MAX(id) AS id FROM usageHistory`)?.id || 0;
+  // Each cache is a prefix of the table as of its own first full read.
+  let entry = cache.map.get(period);
+  if (!entry) {
+    entry = { maxId: lastUsageId, data: null };
+    cache.map.set(period, entry);
+    if (cache.map.size > SUMMARY_CACHE_MAX) cache.map.delete(cache.map.keys().next().value);
+  }
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  // Only "today" is bounded by a wall-clock boundary; other periods need a full
+  // rebuild instead of a patch, so they are recomputed each time.
+  const fixedWindow = period === "today" || period === "24h";
+  const bounds = (ts) => {
+    if (period === "today") return ts >= startOfDay.getTime();
+    if (period === "24h") return ts >= Date.now() - PERIOD_MS["24h"];
+    return true;
+  };
+
+  let base = entry.data;
+  // A patched row with no confirmation source (day rollups only update at
+  // completion, so they may not include the row yet) could be lost forever
+  // from a cache: mark the cache and re-read it next time.
+  const rollupDirty = entry.isRollupDirty;
+  if (base && !fixedWindow && rollupDirty) base = null;
+  // First read: the full query includes every row a later patch would add.
+  if (!base && !fixedWindow) entry.maxId = lastUsageId;
+  // Today/24h are windowed, so a day rollover means the cache is no longer a prefix.
+  const dayKey = getLocalDateKey();
+  if (period === "today" && entry.cachedDay !== dayKey) {
+    base = null;
+    entry.cachedDay = dayKey;
+  }
+  if (!base || !fixedWindow) {
+    base = emptySummary();
+    if (period === "today" || period === "24h") {
+      const cutoff = period === "today" ? startOfDay.toISOString() : new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
+      const rows = all(
+        `SELECT promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
+        [cutoff]
+      );
+      for (const r of rows) {
+        const t = parseJson(r.tokens, {}) || {};
+        base.totalRequests++;
+        base.totalPromptTokens += t.prompt_tokens || t.input_tokens || r.promptTokens || 0;
+        base.totalCompletionTokens += t.completion_tokens || t.output_tokens || r.completionTokens || 0;
+        base.totalCachedTokens += t.cached_tokens || t.cache_read_input_tokens || 0;
+        base.totalCost += r.cost || 0;
+      }
+    } else {
+      const maxDays = { "7d": 7, "30d": 30, "60d": 60 }[period] || null;
+      for (const dr of loadDaysInRange(db, maxDays) || []) {
+        const day = parseJson(dr.data, {});
+        base.totalRequests += day.requests || 0;
+        base.totalPromptTokens += day.promptTokens || 0;
+        base.totalCompletionTokens += day.completionTokens || 0;
+        base.totalCachedTokens += day.cachedTokens || 0;
+        base.totalCost += day.cost || 0;
+      }
+    }
+  }
+
+  // Patch rows inserted since the last patch (id is the only monotonic marker)
+  const data = { ...base };
+  if (lastUsageId > entry.maxId || lastUsageId < entry.maxId) {
+    if (lastUsageId < entry.maxId) entry.maxId = 0; // rows were deleted: re-patch from scratch
+
+    const rows = all(
+      `SELECT id, timestamp, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE id > ? ORDER BY id ASC`,
+      [entry.maxId]
+    );
+    const now = Date.now();
+    for (const r of rows) {
+      entry.maxId = Math.max(entry.maxId, r.id);
+      const ts = new Date(r.timestamp).getTime();
+      const windowed = bounds(ts);
+      if (!windowed || ts > now) {
+        entry.unconfirmed = true;
+        continue;
+      }
+      const t = parseJson(r.tokens, {}) || {};
+      data.totalRequests++;
+      data.totalPromptTokens += t.prompt_tokens || t.input_tokens || r.promptTokens || 0;
+      data.totalCompletionTokens += t.completion_tokens || t.output_tokens || r.completionTokens || 0;
+      data.totalCachedTokens += t.cached_tokens || t.cache_read_input_tokens || 0;
+      data.totalCost += r.cost || 0;
+    }
+  }
+
+  entry.data = data;
+  entry.isRollupDirty = !fixedWindow;
+  return data;
+}
+
+function emptySummary() {
+  return { totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0, totalCachedTokens: 0, totalCost: 0 };
 }
 
 export async function getChartData(period = "7d") {

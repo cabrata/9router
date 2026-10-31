@@ -13,7 +13,9 @@ function isLLMProvider(id) {
 import Badge from "./Badge";
 import Card from "./Card";
 import OverviewCards from "@/app/(dashboard)/dashboard/usage/components/OverviewCards";
+import LiveStats from "@/app/(dashboard)/dashboard/usage/components/LiveStats";
 import UsageTable, { fmt, fmtTime } from "@/app/(dashboard)/dashboard/usage/components/UsageTable";
+import useUsageStream from "@/shared/hooks/useUsageStream";
 import dynamic from "next/dynamic";
 // Lazy-load: keeps @xyflow/react and recharts out of the initial bundle
 const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopology"), { ssr: false });
@@ -218,9 +220,13 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
   const isInitialLoad = useRef(true);
-  const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
+
+  // Realtime feed: recent requests, active requests, and this period's totals
+  const live = useUsageStream(period);
+  const liveSummary = live?.summary || null;
+  const liveStats = live?.stats || null;
 
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
@@ -263,13 +269,14 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       setLoading(true);
     } else {
       setFetching(true);
+      // Totals belong to the previous period; the stream re-sends them shortly.
+      setStats((prev) => (prev ? { ...prev, totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0, totalCachedTokens: 0, totalCost: 0 } : prev));
     }
 
     fetch(`/api/usage/stats?period=${period}`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data) {
-          hasLoadedStats.current = true;
           setStats((prev) => ({ ...prev, ...data }));
         }
       })
@@ -279,35 +286,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         setFetching(false);
       });
   }, [period]);
-
-  // SSE connection - real-time updates for activeRequests + recentRequests only
-  useEffect(() => {
-    const es = new EventSource("/api/usage/stream");
-
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        // Always merge only real-time fields, never overwrite full stats from REST
-        setStats((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            activeRequests: data.activeRequests,
-            recentRequests: data.recentRequests,
-            errorProvider: data.errorProvider,
-            pending: data.pending,
-          };
-        });
-        if (hasLoadedStats.current) setLoading(false);
-      } catch (err) {
-        console.error("[SSE CLIENT] parse error:", err);
-      }
-    };
-
-    es.onerror = () => setLoading(false);
-
-    return () => es.close();
-  }, []);
 
   const toggleSort = useCallback((tableType, field) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -320,15 +298,18 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     router.replace(`?${params.toString()}`, { scroll: false });
   }, [searchParams, router]);
 
+  // Stream carries the full stats payload, so REST is only the first paint
+  const effectiveStats = useMemo(() => (liveStats ? { ...(stats || {}), ...liveStats } : stats), [stats, liveStats]);
+
   // Compute active table data
   const activeTableConfig = useMemo(() => {
-    if (!stats) return null;
+    if (!effectiveStats) return null;
     switch (tableView) {
       case "model": {
-        const pendingMap = stats.pending?.byModel || {};
+        const pendingMap = effectiveStats.pending?.byModel || {};
         return {
           columns: MODEL_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byModel, pendingMap, sortBy, sortOrder), "rawModel"),
+          groupedData: groupDataByKey(sortData(effectiveStats.byModel, pendingMap, sortBy, sortOrder), "rawModel"),
           storageKey: "usage-stats:expanded-models",
           emptyMessage: "No usage recorded yet.",
           renderSummaryCells: (group) => (
@@ -350,9 +331,9 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       }
       case "account": {
         const pendingMap = {};
-        if (stats?.pending?.byAccount) {
-          Object.entries(stats.byAccount || {}).forEach(([accountKey, data]) => {
-            const connPending = stats.pending.byAccount[data.connectionId];
+        if (effectiveStats?.pending?.byAccount) {
+          Object.entries(effectiveStats.byAccount || {}).forEach(([accountKey, data]) => {
+            const connPending = effectiveStats.pending.byAccount[data.connectionId];
             if (connPending) {
               const modelKey = data.provider ? `${data.rawModel} (${data.provider})` : data.rawModel;
               pendingMap[accountKey] = connPending[modelKey] || 0;
@@ -361,7 +342,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         }
         return {
           columns: ACCOUNT_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byAccount, pendingMap, sortBy, sortOrder), "accountName"),
+          groupedData: groupDataByKey(sortData(effectiveStats.byAccount, pendingMap, sortBy, sortOrder), "accountName"),
           storageKey: "usage-stats:expanded-accounts",
           emptyMessage: "No account-specific usage recorded yet.",
           renderSummaryCells: (group) => (
@@ -386,7 +367,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       case "apiKey": {
         return {
           columns: API_KEY_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byApiKey, {}, sortBy, sortOrder), "keyName"),
+          groupedData: groupDataByKey(sortData(effectiveStats.byApiKey, {}, sortBy, sortOrder), "keyName"),
           storageKey: "usage-stats:expanded-apikeys",
           emptyMessage: "No API key usage recorded yet.",
           renderSummaryCells: (group) => (
@@ -412,7 +393,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       default: {
         return {
           columns: ENDPOINT_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byEndpoint, {}, sortBy, sortOrder), "endpoint"),
+          groupedData: groupDataByKey(sortData(effectiveStats.byEndpoint, {}, sortBy, sortOrder), "endpoint"),
           storageKey: "usage-stats:expanded-endpoints",
           emptyMessage: "No endpoint usage recorded yet.",
           renderSummaryCells: (group) => (
@@ -435,9 +416,11 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         };
       }
     }
-  }, [stats, tableView, sortBy, sortOrder]);
+  }, [effectiveStats, tableView, sortBy, sortOrder]);
 
-  if (!stats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
+  const busy = loading && !effectiveStats;
+
+  if (!effectiveStats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
 
   const spinner = (
     <div className="flex items-center justify-center py-12 text-text-muted">
@@ -468,30 +451,37 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         </div>
       )}
 
-      {/* Overview cards */}
-      {loading ? spinner : <OverviewCards stats={stats} />}
+      {/* Overview cards (live totals for the selected period) */}
+      {busy ? spinner : <OverviewCards stats={{ ...effectiveStats, ...(liveSummary || {}) }} />}
 
       {/* Provider topology + Recent Requests */}
-      {loading ? spinner : (
-        <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
-          <ProviderTopology
-            providers={providers}
-            activeRequests={stats.activeRequests || []}
-            lastProvider={stats.recentRequests?.[0]?.provider || ""}
-            errorProvider={stats.errorProvider || ""}
+      {busy ? spinner : (
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+            <ProviderTopology
+              providers={providers}
+              activeRequests={live?.activeRequests || effectiveStats.activeRequests || []}
+              lastProvider={live?.recentRequests?.[0]?.provider || effectiveStats.recentRequests?.[0]?.provider || ""}
+              errorProvider={live?.errorProvider || effectiveStats.errorProvider || ""}
+            />
+            <RecentRequests requests={live?.recentRequests || effectiveStats.recentRequests || []} />
+          </div>
+          <LiveStats
+            requests={live?.recentRequests || effectiveStats.recentRequests || []}
+            pending={effectiveStats.pending || {}}
+            activeRequests={live?.activeRequests || effectiveStats.activeRequests || []}
           />
-          <RecentRequests requests={stats.recentRequests || []} />
         </div>
       )}
 
       {/* Token / Cost chart - sync period */}
-      {loading ? spinner : <UsageChart period={period} />}
+      {busy ? spinner : <UsageChart period={period} />}
 
       {/* Provider and model breakdown charts */}
-      {!loading && (stats.byProvider || stats.byModel) && (
+      {!busy && (effectiveStats.byProvider || effectiveStats.byModel) && (
         <div className="grid min-w-0 grid-cols-1 gap-2 lg:grid-cols-2">
-          <ProviderBarChart byProvider={stats.byProvider} />
-          <TopModelsChart byModel={stats.byModel} />
+          <ProviderBarChart byProvider={effectiveStats.byProvider} />
+          <TopModelsChart byModel={effectiveStats.byModel} />
         </div>
       )}
 
@@ -523,7 +513,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             </button>
           </div>
         </div>
-        {loading ? spinner : activeTableConfig && (
+        {busy ? spinner : activeTableConfig && (
           <UsageTable
             title=""
             columns={activeTableConfig.columns}
