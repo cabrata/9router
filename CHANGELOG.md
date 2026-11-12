@@ -1,3 +1,8 @@
+# v0.5.120 (2026-11-13)
+
+## Fixes
+- **Request log**: drop the failed lease when a client disconnects while queued, so `finish(499)` no longer calls `release()` on a lease that was never acquired
+
 # v0.5.119 (2026-11-11)
 
 ## Features

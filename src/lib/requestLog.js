@@ -126,6 +126,7 @@ export function withRequestLog(kind, handler) {
       if (!requestLease.ok) {
         if (requestLease.reason === "aborted") {
           ctx.error = "client disconnected while queued";
+          requestLease = null;
           finish(499);
           return errorResponse(499, "Client closed while waiting for an available slot");
         }
