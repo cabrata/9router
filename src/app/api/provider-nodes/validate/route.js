@@ -55,7 +55,7 @@ const getChatErrorMessage = (status) => {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { baseUrl, apiKey, type, modelId } = body;
+    const { baseUrl, apiKey, type, modelId, userAgent } = body;
 
     if (!baseUrl || !apiKey) {
       return NextResponse.json({ error: "Base URL and API key required" }, { status: 400 });
@@ -85,7 +85,8 @@ export async function POST(request) {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...(userAgent?.trim() ? { "User-Agent": userAgent.trim() } : {})
         },
         body: JSON.stringify({ model: modelId.trim(), input: "ping" })
       });
@@ -118,7 +119,8 @@ export async function POST(request) {
         headers: {
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${apiKey}`
+          "Authorization": `Bearer ${apiKey}`,
+          ...(userAgent?.trim() ? { "User-Agent": userAgent.trim() } : {})
         }
       });
 
@@ -137,7 +139,8 @@ export async function POST(request) {
             "Authorization": `Bearer ${apiKey}`,
             "Content-Type": "application/json",
             "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
+            ...(userAgent?.trim() ? { "User-Agent": userAgent.trim() } : {})
           },
           body: JSON.stringify({
             model: modelId,
@@ -161,7 +164,10 @@ export async function POST(request) {
     // OpenAI Compatible Validation (Default)
     const modelsUrl = `${baseUrl.replace(/\/$/, "")}/models`;
     const res = await fetchWithTimeout(modelsUrl, {
-      headers: { "Authorization": `Bearer ${apiKey}` },
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        ...(userAgent?.trim() ? { "User-Agent": userAgent.trim() } : {})
+      },
     });
 
     if (res.ok) return NextResponse.json({ valid: true });
@@ -177,7 +183,8 @@ export async function POST(request) {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...(userAgent?.trim() ? { "User-Agent": userAgent.trim() } : {})
         },
         body: JSON.stringify({
           model: modelId,

@@ -577,12 +577,15 @@ export async function GET(request, { params }) {
         return NextResponse.json({ error: "No base URL configured for OpenAI compatible provider" }, { status: 400 });
       }
       const url = `${baseUrl.replace(/\/$/, "")}/models`;
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${connection.apiKey}`,
+      };
+      const customUa = connection.providerSpecificData?.userAgent;
+      if (customUa) headers["User-Agent"] = customUa;
       const response = await fetch(url, {
         method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${connection.apiKey}`,
-        },
+        headers,
       });
 
       if (!response.ok) {
@@ -616,14 +619,17 @@ export async function GET(request, { params }) {
       }
 
       const url = `${baseUrl}/models`;
+      const headers = {
+        "Content-Type": "application/json",
+        "x-api-key": connection.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Authorization": `Bearer ${connection.apiKey}`
+      };
+      const customUa = connection.providerSpecificData?.userAgent;
+      if (customUa) headers["User-Agent"] = customUa;
       const response = await fetch(url, {
         method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": connection.apiKey,
-          "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${connection.apiKey}`
-        },
+        headers,
       });
 
       if (!response.ok) {

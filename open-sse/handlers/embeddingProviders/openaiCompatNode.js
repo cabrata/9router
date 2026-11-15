@@ -10,4 +10,10 @@ export default {
     const baseUrl = rawBaseUrl.replace(/\/$/, "").replace(/\/embeddings$/, "");
     return `${baseUrl}/embeddings`;
   },
+  buildHeaders: (creds, ctx) => {
+    const headers = baseAdapter.buildHeaders(creds, ctx);
+    const customUa = creds?.providerSpecificData?.userAgent;
+    if (customUa) headers["User-Agent"] = customUa;
+    return headers;
+  },
 };

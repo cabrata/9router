@@ -271,6 +271,16 @@ export class DefaultExecutor extends BaseExecutor {
       }
     }
 
+    if (this.provider?.startsWith?.("openai-compatible-") || this.provider?.startsWith?.("anthropic-compatible-")) {
+      const customUa = credentials?.providerSpecificData?.userAgent;
+      const clientUa = credentials?.rawHeaders?.["user-agent"] || credentials?.rawHeaders?.["User-Agent"];
+      if (customUa) {
+        headers["User-Agent"] = customUa;
+      } else if (clientUa && !headers["User-Agent"]) {
+        headers["User-Agent"] = clientUa;
+      }
+    }
+
     if (stream) headers["Accept"] = "text/event-stream";
     return headers;
   }

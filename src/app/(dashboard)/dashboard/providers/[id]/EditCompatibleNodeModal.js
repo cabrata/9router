@@ -10,6 +10,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
     prefix: "",
     apiType: "chat",
     baseUrl: "https://api.openai.com/v1",
+    userAgent: "",
   });
   const [saving, setSaving] = useState(false);
   const [checkKey, setCheckKey] = useState("");
@@ -24,6 +25,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         prefix: node.prefix || "",
         apiType: node.apiType || "chat",
         baseUrl: node.baseUrl || (isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"),
+        userAgent: node.userAgent || "",
       });
     }
   }, [node, isAnthropic]);
@@ -41,6 +43,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         name: formData.name,
         prefix: formData.prefix,
         baseUrl: formData.baseUrl,
+        userAgent: formData.userAgent.trim() || null,
       };
       if (!isAnthropic) {
         payload.apiType = formData.apiType;
@@ -61,7 +64,8 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           baseUrl: formData.baseUrl,
           apiKey: checkKey,
           type: isAnthropic ? "anthropic-compatible" : "openai-compatible",
-          modelId: checkModelId.trim() || undefined
+          modelId: checkModelId.trim() || undefined,
+          userAgent: formData.userAgent.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -107,6 +111,25 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           placeholder={isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"}
           hint={`Use the base URL (ending in /v1) for your ${isAnthropic ? "Anthropic" : "OpenAI"}-compatible API.`}
         />
+        <Input
+          label="Custom User-Agent (optional)"
+          value={formData.userAgent}
+          onChange={(e) => setFormData({ ...formData, userAgent: e.target.value })}
+          placeholder="e.g. Claude Code, Codex, Cursor, or custom UA"
+          hint="Optional. Custom User-Agent header for providers that restrict clients (e.g. claude-cli/2.1.322, codex_cli_rs/0.167.1)."
+          list="edit-compatible-user-agent-presets"
+        />
+        <datalist id="edit-compatible-user-agent-presets">
+          <option value="claude-cli/2.1.322 (external, sdk-cli)">Claude Code</option>
+          <option value="codex_cli_rs/0.167.1">Codex</option>
+          <option value="cursor/0.45.0">Cursor</option>
+          <option value="opencode/1.18.31">OpenCode</option>
+          <option value="Cline/3.0.0">Cline</option>
+          <option value="Roo-Code/3.0.0">Roo</option>
+          <option value="Trae/1.0.0">Trae</option>
+          <option value="GitHubCopilot/1.155.0">GitHub Copilot</option>
+          <option value="grok-cli/0.1.0">Grok CLI</option>
+        </datalist>
         <div className="flex gap-2">
           <Input
             label="API Key (for Check)"

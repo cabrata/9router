@@ -6,7 +6,7 @@ export async function PUT(request, { params }) {
   try {
     const { id } = await params;
     const body = await request.json();
-    const { name, prefix, apiType, baseUrl } = body;
+    const { name, prefix, apiType, baseUrl, userAgent } = body;
     const node = await getProviderNodeById(id);
 
     if (!node) {
@@ -54,6 +54,10 @@ export async function PUT(request, { params }) {
       baseUrl: sanitizedBaseUrl,
     };
 
+    if (userAgent !== undefined) {
+      updates.userAgent = userAgent ? userAgent.trim() : null;
+    }
+
     if (node.type === "openai-compatible") {
       updates.apiType = apiType;
     }
@@ -69,6 +73,7 @@ export async function PUT(request, { params }) {
           apiType: node.type === "openai-compatible" ? apiType : undefined,
           baseUrl: sanitizedBaseUrl,
           nodeName: updated.name,
+          userAgent: userAgent !== undefined ? (userAgent ? userAgent.trim() : null) : connection.providerSpecificData?.userAgent,
         }
       })
     )));

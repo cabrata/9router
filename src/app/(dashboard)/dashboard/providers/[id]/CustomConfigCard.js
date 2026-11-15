@@ -83,8 +83,10 @@ export default function CustomConfigCard({ providerId }) {
     setRows(Object.entries(builtin).map(([name, value]) => ({ name, value })));
   };
 
-  // Only render when there is something to customize: registry headers or existing overrides
-  if (Object.keys(builtin).length === 0 && !hasOverride) return null;
+  const isCompatible = providerId?.startsWith("openai-compatible-") || providerId?.startsWith("anthropic-compatible-") || providerId?.startsWith("custom-embedding-");
+
+  // Only render when there is something to customize: registry headers, existing overrides, or compatible provider
+  if (!isCompatible && Object.keys(builtin).length === 0 && !hasOverride) return null;
 
   return (
     <Card padding="xs">

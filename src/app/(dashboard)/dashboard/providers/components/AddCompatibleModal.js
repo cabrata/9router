@@ -41,6 +41,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
     prefix: "",
     ...(config.hasApiType ? { apiType: "chat" } : {}),
     baseUrl: config.defaultBaseUrl,
+    userAgent: "",
   });
 
   const [formData, setFormData] = useState(initialFormData);
@@ -73,6 +74,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           prefix: formData.prefix,
           ...(config.hasApiType ? { apiType: formData.apiType } : {}),
           baseUrl: formData.baseUrl,
+          userAgent: formData.userAgent.trim() || undefined,
           type: config.type,
         }),
       });
@@ -101,6 +103,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           apiKey: checkKey,
           type: config.type,
           modelId: checkModelId.trim() || undefined,
+          userAgent: formData.userAgent.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -165,6 +168,25 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           placeholder={config.defaultBaseUrl}
           hint={config.baseUrlHint}
         />
+        <Input
+          label="Custom User-Agent (optional)"
+          value={formData.userAgent}
+          onChange={(e) => setFormData({ ...formData, userAgent: e.target.value })}
+          placeholder="e.g. Claude Code, Codex, Cursor, or custom UA"
+          hint="Optional. Custom User-Agent header for providers that restrict clients (e.g. claude-cli/2.1.322, codex_cli_rs/0.167.1)."
+          list="compatible-user-agent-presets"
+        />
+        <datalist id="compatible-user-agent-presets">
+          <option value="claude-cli/2.1.322 (external, sdk-cli)">Claude Code</option>
+          <option value="codex_cli_rs/0.167.1">Codex</option>
+          <option value="cursor/0.45.0">Cursor</option>
+          <option value="opencode/1.18.31">OpenCode</option>
+          <option value="Cline/3.0.0">Cline</option>
+          <option value="Roo-Code/3.0.0">Roo</option>
+          <option value="Trae/1.0.0">Trae</option>
+          <option value="GitHubCopilot/1.155.0">GitHub Copilot</option>
+          <option value="grok-cli/0.1.0">Grok CLI</option>
+        </datalist>
         <Input
           label="API Key (for Check)"
           type="password"

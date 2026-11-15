@@ -826,8 +826,10 @@ async function handleAddCustomNode() {
     apiType = OPENAI_API_TYPES[apiTypeIdx] || "chat";
   }
 
+  const userAgent = await prompt("Custom User-Agent (optional, e.g. Claude Code/Codex): ");
+
   showStatus("Creating provider node...", "info");
-  const body = { name, prefix, baseUrl, type, ...(apiType && { apiType }) };
+  const body = { name, prefix, baseUrl, type, ...(apiType && { apiType }), ...(userAgent?.trim() && { userAgent: userAgent.trim() }) };
   const res = await api.createProviderNode(body);
 
   showStatus(res.success ? "✓ Provider created!" : `✗ Failed: ${res.error}`, res.success ? "success" : "error");
@@ -845,11 +847,13 @@ async function handleEditCustomNode(node) {
   const name = await prompt(`Name (${node.name}): `);
   const baseUrl = await prompt(`Base URL (${node.baseUrl}): `);
   const prefix = await prompt(`Prefix (${node.prefix}): `);
+  const userAgent = await prompt(`User-Agent (${node.userAgent || "none"}): `);
 
   const updates = {};
   if (name && name.trim()) updates.name = name.trim();
   if (baseUrl && baseUrl.trim()) updates.baseUrl = baseUrl.trim();
   if (prefix && prefix.trim()) updates.prefix = prefix.trim();
+  if (userAgent !== undefined && userAgent.trim()) updates.userAgent = userAgent.trim();
 
   if (!Object.keys(updates).length) {
     showStatus("No changes", "warning"); await pause(); return;

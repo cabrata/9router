@@ -13,6 +13,7 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
     name: "",
     prefix: "",
     baseUrl: DEFAULT_BASE_URL,
+    userAgent: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [checkKey, setCheckKey] = useState("");
@@ -30,9 +31,10 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
         name: node.name || "",
         prefix: node.prefix || "",
         baseUrl: node.baseUrl || DEFAULT_BASE_URL,
+        userAgent: node.userAgent || "",
       });
     } else {
-      setFormData({ name: "", prefix: "", baseUrl: DEFAULT_BASE_URL });
+      setFormData({ name: "", prefix: "", baseUrl: DEFAULT_BASE_URL, userAgent: "" });
     }
   }, [isOpen, isEdit, node]);
 
@@ -46,6 +48,7 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
         name: formData.name,
         prefix: formData.prefix,
         baseUrl: formData.baseUrl,
+        ...(formData.userAgent?.trim() ? { userAgent: formData.userAgent.trim() } : (isEdit ? { userAgent: null } : {})),
       };
       if (!isEdit) payload.type = "custom-embedding";
 
@@ -77,6 +80,7 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
           apiKey: checkKey,
           type: "custom-embedding",
           modelId: checkModelId.trim() || undefined,
+          userAgent: formData.userAgent?.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -130,6 +134,13 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
           onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
           placeholder="https://api.voyageai.com/v1"
           hint="Most embedding APIs are OpenAI-compatible: Voyage, Cohere, Jina, Mistral, Together..."
+        />
+        <Input
+          label="Custom User-Agent (optional)"
+          value={formData.userAgent}
+          onChange={(e) => setFormData({ ...formData, userAgent: e.target.value })}
+          placeholder="e.g. Claude Code, Codex, Cursor, or custom UA"
+          hint="Optional. Custom User-Agent header for providers that restrict clients."
         />
         <Input
           label="API Key (for Check)"
