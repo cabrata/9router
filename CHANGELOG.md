@@ -1,3 +1,8 @@
+# v0.5.121 (2026-11-15)
+
+## Features
+- **Compatible Providers**: add custom User-Agent support with presets (Claude Code, Codex, Cursor, OpenCode, Cline, etc.) to bypass client restrictions on OpenAI and Anthropic compatible providers
+
 # v0.5.120 (2026-11-13)
 
 ## Fixes
