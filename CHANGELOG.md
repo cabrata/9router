@@ -1,3 +1,12 @@
+# v0.5.124 (2026-11-23)
+
+## Features
+- **Compatible Providers**: custom User-Agent support with presets (Claude Code, Codex, Cursor, OpenCode, Cline, etc.) to bypass client restrictions on OpenAI and Anthropic compatible providers
+- Merge upstream v0.5.123: Antigravity Gemini 4 Hydrogen, Kiro identity fix, OpenDesign Go, DeepRelay, qwencloud, updated Cloudflare AI catalog
+
+## Fixes
+- **Request log**: drop the failed lease when a client disconnects while queued, so `finish(499)` no longer calls `release()` on a lease that was never acquired
+
 # v0.5.123 (2026-11-22)
 
 ## Features
